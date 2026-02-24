@@ -1215,7 +1215,7 @@ tunnel_actions() {
     tty_out "6) Delete tunnel"
     tty_out "0) Back"
     tty_out ""
-    local c; c="$(input_int_range "Select an item" 0 6 "0")"
+    local c; c="$(input_int_range "Select an option" 0 6 "0")"
     case "${c}" in
       1) systemctl status "${svc}" --no-pager || true; pause ;;
       2) systemctl restart "${svc}" || die "Failed to restart ${svc}"; tty_out "Restarted."; pause ;;
@@ -1595,7 +1595,7 @@ main_menu() {
     tty_out "6) Uninstall"
     tty_out "0) Exit"
     tty_out ""
-    local c; c="$(input_int_range "Choice" 0 6 "")"
+    local c; c="$(input_int_range "Select an option" 0 6 "")"
     case "${c}" in
       1) install_or_update; pause ;;
       2) create_tunnel ;;
