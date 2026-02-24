@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.5)
+# Backhaul Manager (v1.0.6)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.5"
+MANAGER_VERSION="v1.0.6"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -56,10 +56,16 @@ on_err() {
 }
 trap on_err ERR
 
-# ---------- TTY IO helpers ----------
+# ---------- TTY IO helpers  ----------
 tty_out() { printf "%b\n" "$*" > /dev/tty; }
 tty_print() { printf "%b" "$*" > /dev/tty; }
-tty_readline() { local __var="$1"; shift; IFS= read -r -p "$*" "${__var}" < /dev/tty; }
+tty_readline() {
+  local __var="$1"; shift
+  local __tmp=""
+  IFS= read -r -p "$*" __tmp < /dev/tty || true
+  __tmp="${__tmp//$'\r'/}"
+  printf -v "${__var}" "%s" "${__tmp}"
+}
 
 pause() { tty_readline _ "Press Enter to continue..."; }
 
