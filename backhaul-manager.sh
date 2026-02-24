@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.10)
+# Backhaul Manager (v1.0.11)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.10"
+MANAGER_VERSION="v1.0.11"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -1249,9 +1249,16 @@ restart_all() {
   ensure_dirs
   need_systemd
   [[ -s "${DB_FILE}" ]] || return 0
+
+  # Output format (TSV):
+  # name<TAB>service<TAB>restart_exit<TAB>active_state
   while IFS='|' read -r name role trans conf svc; do
     [[ -z "${name:-}" ]] && continue
-    systemctl restart "${svc}" >/dev/null 2>&1 || true
+
+    local rc=0
+    systemctl restart "${svc}" >/dev/null 2>&1 || rc=$?
+    local st; st="$(systemctl is-active "${svc}" 2>/dev/null || true)"
+    echo -e "${name}	${svc}	${rc}	${st}"
   done < "${DB_FILE}"
 }
 
@@ -1259,15 +1266,47 @@ restart_all_ui() {
   print_header
   tty_out "${BOLD}Restart All Tunnels${NC}"
   tty_out ""
+
   if [[ ! -s "${DB_FILE}" ]]; then
     tty_out "No tunnels found."
     pause
     return
   fi
-  restart_all
-  tty_out "Done."
+
+  tty_out "${BOLD}Results:${NC}"
+  tty_out "  ${GRAY}NAME${NC}	${GRAY}SERVICE${NC}	${GRAY}RESTART${NC}	${GRAY}STATE${NC}"
+  tty_out "  ---------------------------------------------------------------"
+
+  local any_fail=0
+  while IFS=$'	' read -r name svc rc st; do
+    local restart_label state_label
+
+    if [[ "${rc}" == "0" ]]; then
+      restart_label="${GREEN}OK${NC}"
+    else
+      restart_label="${RED}FAIL(${rc})${NC}"
+      any_fail=1
+    fi
+
+    if [[ "${st}" == "active" ]]; then
+      state_label="${GREEN}${st}${NC}"
+    else
+      state_label="${YELLOW}${st}${NC}"
+      any_fail=1
+    fi
+
+    tty_out "  ${name}	${svc}	${restart_label}	${state_label}"
+  done < <(restart_all)
+
+  tty_out ""
+  if (( any_fail == 0 )); then
+    tty_out "${GREEN}All tunnels restarted successfully.${NC}"
+  else
+    tty_out "${YELLOW}Some tunnels did not restart cleanly.${NC} Use 'Manage tunnels' -> 'Show status' for details.${NC}"
+  fi
   pause
 }
+
 
 # ---------- scheduling (global) ----------
 timer_unit_name() { echo "backhaul-manager-${1}.timer"; }
@@ -1287,16 +1326,35 @@ show_scheduling_status() {
 
   tty_out ""
   tty_out "${BOLD}Systemd timers:${NC}"
-  systemctl list-timers --all --no-pager 2>/dev/null | grep -E "backhaul-manager-(restart-all|health-check)\.timer" > /dev/tty || tty_out "  (none)"
+  if systemctl list-timers --all --no-pager 2>/dev/null | grep -qE "backhaul-manager-(restart-all|health-check)\.timer"; then
+    systemctl list-timers --all --no-pager 2>/dev/null | grep -E "backhaul-manager-(restart-all|health-check)\.timer" > /dev/tty || true
+  else
+    tty_out "  (none)"
+  fi
 
   tty_out ""
+  tty_out "${BOLD}Timer details:${NC}"
   for u in "$(timer_unit_name restart-all)" "$(timer_unit_name health-check)"; do
     if systemctl status "${u}" --no-pager >/dev/null 2>&1; then
-      local st; st="$(systemctl is-enabled "${u}" 2>/dev/null || true)"
-      local act; act="$(systemctl is-active "${u}" 2>/dev/null || true)"
-      tty_out "  ${u}: enabled=${st} active=${act}"
+      local st act next last
+      st="$(systemctl is-enabled "${u}" 2>/dev/null || true)"
+      act="$(systemctl is-active "${u}" 2>/dev/null || true)"
+      next="$(systemctl show "${u}" -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+      last="$(systemctl show "${u}" -p LastTriggerUSec --value 2>/dev/null || true)"
+
+      [[ -z "${next}" ]] && next="n/a"
+      [[ -z "${last}" ]] && last="n/a"
+
+      tty_out "  ${u}: enabled=${st}  active=${act}"
+      tty_out "    next: ${next}"
+      tty_out "    last: ${last}"
+    else
+      tty_out "  ${u}: (not installed)"
     fi
   done
+
+  tty_out ""
+  tty_out "${GRAY}Note:${NC} If NEXT/LEFT shows n/a, it usually means the timer has no upcoming trigger (misparsed schedule or only ran OnBootSec once). Recreate the timer from the Scheduling menu to regenerate unit files."
   tty_out ""
   pause
 }
@@ -1344,8 +1402,9 @@ EOF
 Description=Backhaul Manager - Restart All Tunnels (Timer)
 
 [Timer]
+Unit=$(timer_svc_name restart-all)
 OnBootSec=5min
-OnUnitActiveSec=${minutes}min
+OnUnitInactiveSec=${minutes}min
 Persistent=true
 
 [Install]
@@ -1376,8 +1435,9 @@ EOF
 Description=Backhaul Manager - Health Check Tunnels (Timer)
 
 [Timer]
+Unit=$(timer_svc_name health-check)
 OnBootSec=5min
-OnUnitActiveSec=${minutes}min
+OnUnitInactiveSec=${minutes}min
 Persistent=true
 
 [Install]
