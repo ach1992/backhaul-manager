@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Backhaul Manager - single-file installer + management menu
-# Core repo: https://github.com/Musixal/Backhaul
+# Backhaul Manager - single-file installer + menu (English-only)
+# Manager Repo: https://github.com/ach1992/backhaul-manager/
+# Core Repo:    https://github.com/Musixal/Backhaul
 
 set -u
 export LC_ALL=C
@@ -10,27 +11,28 @@ export LC_ALL=C
 ########################################
 MANAGER_NAME="Backhaul Manager"
 MANAGER_CMD="backhaul-manager"
-MANAGER_INSTALL_PATH="/usr/local/bin/${MANAGER_CMD}"
+MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 
 CORE_REPO="Musixal/Backhaul"
 CORE_BIN_NAME="backhaul"
 CORE_INSTALL_PATH="/usr/local/bin/${CORE_BIN_NAME}"
+
+MANAGER_INSTALL_PATH="/usr/local/bin/${MANAGER_CMD}"
 
 BASE_DIR="/etc/backhaul-manager"
 TUNNELS_DIR="${BASE_DIR}/tunnels"
 SSL_DIR="${BASE_DIR}/ssl"
 LOG_DIR="/var/log/backhaul-manager"
 
+CORE_VERSION_FILE="${BASE_DIR}/core.version"
+
 SYSTEMD_TEMPLATE="/etc/systemd/system/backhaul@.service"
 
-# Health-check (systemd timer)
+CRON_FILE="/etc/cron.d/backhaul-manager"
+
 HEALTH_SERVICE="/etc/systemd/system/backhaul-manager-health.service"
 HEALTH_TIMER="/etc/systemd/system/backhaul-manager-health.timer"
 
-# Optional periodic restart via cron (keep it)
-CRON_FILE="/etc/cron.d/backhaul-manager"
-
-# Offline install folder
 OFFLINE_DIR="/root/backhaul-manager"
 
 ########################################
@@ -50,7 +52,7 @@ die(){
 
 need_root(){
   if [[ "${EUID}" -ne 0 ]]; then
-    die "This script must be run as root. Use: sudo"
+    die "This script must be run as root (use sudo)."
   fi
 }
 
@@ -71,6 +73,19 @@ ui_msg(){
   local msg="${2:-}"
   if [[ "$UI_MODE" == "whiptail" ]]; then
     whiptail --title "$title" --msgbox "$msg" 12 78
+  else
+    echo "== $title =="
+    echo "$msg"
+    echo
+    read -r -p "Press Enter to continue..."
+  fi
+}
+
+ui_textarea(){
+  local title="${1:-$MANAGER_NAME}"
+  local msg="${2:-}"
+  if [[ "$UI_MODE" == "whiptail" ]]; then
+    whiptail --title "$title" --scrolltext --msgbox "$msg" 22 90
   else
     echo "== $title =="
     echo "$msg"
@@ -117,7 +132,7 @@ ui_menu(){
   local title="$1"; shift
   local prompt="$1"; shift
   if [[ "$UI_MODE" == "whiptail" ]]; then
-    whiptail --title "$title" --menu "$prompt" 20 86 12 "$@" 3>&1 1>&2 2>&3
+    whiptail --title "$title" --menu "$prompt" 20 90 12 "$@" 3>&1 1>&2 2>&3
   else
     echo "== $title =="
     echo "$prompt"
@@ -126,26 +141,13 @@ ui_menu(){
       shift 2
     done
     local sel=""
-    read -r -p "Select: " sel
+    read -r -p "Choose: " sel
     printf "%s" "$sel"
   fi
 }
 
-ui_text(){
-  local title="${1:-$MANAGER_NAME}"
-  local msg="${2:-}"
-  if [[ "$UI_MODE" == "whiptail" ]]; then
-    whiptail --title "$title" --msgbox "$msg" 20 86
-  else
-    echo "== $title =="
-    echo "$msg"
-    echo
-    read -r -p "Press Enter to continue..."
-  fi
-}
-
 ########################################
-# Package manager helpers
+# System helpers
 ########################################
 detect_arch(){
   local m
@@ -154,7 +156,7 @@ detect_arch(){
     x86_64|amd64) echo "amd64" ;;
     aarch64|arm64) echo "arm64" ;;
     *)
-      die "Unsupported architecture: $m (supported: amd64/arm64)"
+      die "Unsupported architecture: $m (supported: amd64, arm64)"
       ;;
   esac
 }
@@ -174,12 +176,24 @@ pm_install(){
   local pm
   pm="$(detect_pm)"
   case "$pm" in
-    apt) DEBIAN_FRONTEND=noninteractive apt-get -y install "$pkg" >/dev/null 2>&1 ;;
-    dnf) dnf -y install "$pkg" >/dev/null 2>&1 ;;
-    yum) yum -y install "$pkg" >/dev/null 2>&1 ;;
-    apk) apk add --no-cache "$pkg" >/dev/null 2>&1 ;;
-    pacman) pacman -Sy --noconfirm "$pkg" >/dev/null 2>&1 ;;
-    *) return 1 ;;
+    apt)
+      DEBIAN_FRONTEND=noninteractive apt-get -y install "$pkg" >/dev/null 2>&1 || return 1
+      ;;
+    dnf)
+      dnf -y install "$pkg" >/dev/null 2>&1 || return 1
+      ;;
+    yum)
+      yum -y install "$pkg" >/dev/null 2>&1 || return 1
+      ;;
+    apk)
+      apk add --no-cache "$pkg" >/dev/null 2>&1 || return 1
+      ;;
+    pacman)
+      pacman -Sy --noconfirm "$pkg" >/dev/null 2>&1 || return 1
+      ;;
+    *)
+      return 1
+      ;;
   esac
 }
 
@@ -190,30 +204,23 @@ ensure_cmd(){
     return 0
   fi
   ylw "Installing dependency: $pkg"
-  pm_install "$pkg" || die "Failed to install dependency: $pkg. Please install it manually."
+  pm_install "$pkg" || die "Failed to install $pkg. Please install it manually and re-run."
 }
 
 ensure_prereqs(){
-  # No full system upgrade. Only install missing packages.
+  # No full upgrade; only install missing.
   ensure_cmd tar tar
   ensure_cmd systemctl systemd
-  # Download tool
   if ! cmd_exists curl && ! cmd_exists wget; then
-    pm_install curl >/dev/null 2>&1 || pm_install wget >/dev/null 2>&1 || die "Neither curl nor wget is available and installation failed."
+    pm_install curl >/dev/null 2>&1 || pm_install wget >/dev/null 2>&1 || die "Neither curl nor wget is available and install failed."
   fi
-  # UI (optional)
   if ! cmd_exists whiptail; then
     pm_install whiptail >/dev/null 2>&1 || pm_install newt >/dev/null 2>&1 || true
   fi
-  # Port check
+  # Best-effort for port check
   pm_install iproute2 >/dev/null 2>&1 || true
-  # OpenSSL for cert generation
-  pm_install openssl >/dev/null 2>&1 || true
 }
 
-########################################
-# Download helpers
-########################################
 download_file(){
   local url="$1"
   local out="$2"
@@ -224,16 +231,28 @@ download_file(){
   fi
 }
 
+safe_mkdir(){
+  local d="$1"
+  [[ -d "$d" ]] || mkdir -p "$d"
+}
+
+systemd_reload(){
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+########################################
+# GitHub release helpers (no jq)
+########################################
 github_latest_release_json(){
   local tmp="/tmp/backhaul_latest_release.json"
-  download_file "https://api.github.com/repos/${CORE_REPO}/releases/latest" "$tmp" || die "Cannot reach GitHub API (releases/latest)."
+  download_file "https://api.github.com/repos/${CORE_REPO}/releases/latest" "$tmp" || die "Failed to reach GitHub API for latest release."
   echo "$tmp"
 }
 
 extract_latest_tag(){
   local json="$1"
   # "tag_name": "v0.7.2"
-  grep -m1 -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' "$json" | sed -E 's/.*"([^"]+)".*/\1/'
+  grep -oE '"tag_name"\s*:\s*"[^"]+"' "$json" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/'
 }
 
 extract_download_url(){
@@ -243,11 +262,46 @@ extract_download_url(){
 }
 
 ########################################
-# Paths / system
+# Core helpers
 ########################################
-safe_mkdir(){
-  local d="$1"
-  [[ -d "$d" ]] || mkdir -p "$d"
+core_installed(){
+  [[ -x "$CORE_INSTALL_PATH" ]]
+}
+
+core_version_local(){
+  if [[ -f "$CORE_VERSION_FILE" ]]; then
+    tr -d '\r\n' < "$CORE_VERSION_FILE"
+  else
+    echo "unknown"
+  fi
+}
+
+set_core_version_local(){
+  local v="$1"
+  echo "$v" > "$CORE_VERSION_FILE"
+}
+
+core_version_runtime(){
+  if core_installed; then
+    "$CORE_INSTALL_PATH" -v 2>/dev/null | tr -d '\r' || true
+  else
+    echo "not-installed"
+  fi
+}
+
+manager_installed(){
+  [[ -x "$MANAGER_INSTALL_PATH" ]]
+}
+
+install_manager_self(){
+  local src="$0"
+  if manager_installed; then
+    return 0
+  fi
+  if [[ -f "$src" ]]; then
+    cp -f "$src" "$MANAGER_INSTALL_PATH" || die "Failed to copy manager to ${MANAGER_INSTALL_PATH}"
+    chmod +x "$MANAGER_INSTALL_PATH" || true
+  fi
 }
 
 install_system_layout(){
@@ -255,126 +309,9 @@ install_system_layout(){
   safe_mkdir "$TUNNELS_DIR"
   safe_mkdir "$SSL_DIR"
   safe_mkdir "$LOG_DIR"
-  chmod 700 "$BASE_DIR" "$TUNNELS_DIR" "$SSL_DIR" >/dev/null 2>&1 || true
+  chmod 700 "$BASE_DIR" "$TUNNELS_DIR" "$SSL_DIR" || true
 }
 
-systemd_reload(){
-  systemctl daemon-reload >/dev/null 2>&1 || true
-}
-
-########################################
-# Core installed/version/update
-########################################
-core_installed(){
-  [[ -x "$CORE_INSTALL_PATH" ]]
-}
-
-core_version_raw(){
-  if core_installed; then
-    "$CORE_INSTALL_PATH" -v 2>/dev/null | tr -d '\r' || true
-  else
-    echo ""
-  fi
-}
-
-core_version_tag_guess(){
-  # best-effort extraction of vX.Y.Z from -v output
-  local v
-  v="$(core_version_raw)"
-  echo "$v" | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1
-}
-
-install_core_from_tgz(){
-  local tgz="$1"
-  [[ -f "$tgz" ]] || die "Archive not found: $tgz"
-  local tmpdir="/tmp/backhaul_extract_$$"
-  rm -rf "$tmpdir" && mkdir -p "$tmpdir"
-  tar -xzf "$tgz" -C "$tmpdir" || die "Failed to extract: $tgz"
-  [[ -f "${tmpdir}/backhaul" ]] || die "Binary 'backhaul' not found in archive."
-  install -m 0755 "${tmpdir}/backhaul" "$CORE_INSTALL_PATH" || die "Failed to install core binary to $CORE_INSTALL_PATH"
-  rm -rf "$tmpdir"
-}
-
-install_core_offline_if_possible(){
-  local arch="$1"
-  local tgz="${OFFLINE_DIR}/backhaul_linux_${arch}.tar.gz"
-  if [[ -d "$OFFLINE_DIR" && -f "$tgz" ]]; then
-    if ui_yesno "$MANAGER_NAME" "Offline package found at:\n${tgz}\n\nInstall core from offline package?"; then
-      install_core_from_tgz "$tgz"
-      return 0
-    fi
-  fi
-  return 1
-}
-
-install_or_update_core_online(){
-  local arch="$1"
-  local json tag url
-  json="$(github_latest_release_json)"
-  tag="$(extract_latest_tag "$json")"
-  [[ -n "$tag" ]] || die "Failed to parse latest release tag."
-  url="$(extract_download_url "$json" "$arch")"
-  [[ -n "$url" ]] || die "Failed to find download URL for linux_${arch} tar.gz."
-
-  local current
-  current="$(core_version_tag_guess)"
-  if core_installed; then
-    # If we can compare tags, skip when equal.
-    if [[ -n "$current" && "$current" == "$tag" ]]; then
-      ui_msg "$MANAGER_NAME" "Core is already up to date.\n\nInstalled: $current\nLatest:    $tag"
-      rm -f "$json" >/dev/null 2>&1 || true
-      return 0
-    fi
-    if ! ui_yesno "$MANAGER_NAME" "A newer core may be available.\n\nInstalled (detected): ${current:-unknown}\nLatest:               $tag\n\nDo you want to download and update core now?"; then
-      rm -f "$json" >/dev/null 2>&1 || true
-      return 0
-    fi
-  else
-    ui_msg "$MANAGER_NAME" "Core is not installed.\nLatest release: $tag\n\nCore will be installed now."
-  fi
-
-  local tgz="/tmp/backhaul_linux_${arch}.tar.gz"
-  download_file "$url" "$tgz" || die "Failed to download core archive."
-  install_core_from_tgz "$tgz"
-  rm -f "$tgz" "$json" >/dev/null 2>&1 || true
-  ui_msg "$MANAGER_NAME" "Core installed/updated successfully.\n\nNow installed version output:\n$(core_version_raw)"
-}
-
-install_or_update_core(){
-  local arch
-  arch="$(detect_arch)"
-
-  # Prefer offline if user wants AND file exists
-  if install_core_offline_if_possible "$arch"; then
-    ui_msg "$MANAGER_NAME" "Core installed from offline package.\n\nVersion output:\n$(core_version_raw)"
-    return 0
-  fi
-
-  install_or_update_core_online "$arch"
-}
-
-########################################
-# Install manager command
-########################################
-manager_installed(){
-  [[ -x "$MANAGER_INSTALL_PATH" ]]
-}
-
-install_manager_self(){
-  local src="$0"
-  # Best-effort: install only if not already installed or user wants overwrite
-  if manager_installed; then
-    return 0
-  fi
-  if [[ -f "$src" ]]; then
-    cp -f "$src" "$MANAGER_INSTALL_PATH" || die "Failed to copy manager to $MANAGER_INSTALL_PATH"
-    chmod +x "$MANAGER_INSTALL_PATH" || true
-  fi
-}
-
-########################################
-# systemd template for tunnels
-########################################
 install_systemd_template(){
   if [[ -f "$SYSTEMD_TEMPLATE" ]]; then
     return 0
@@ -406,18 +343,76 @@ EOF
 }
 
 ########################################
-# Health-check service & timer
+# Offline / online core install/update
 ########################################
-health_timer_is_enabled(){
-  systemctl is-enabled --quiet backhaul-manager-health.timer 2>/dev/null
+install_core_from_tgz(){
+  local tgz="$1"
+  local tag="$2"
+
+  local tmpdir="/tmp/backhaul_extract_$$"
+  rm -rf "$tmpdir" && mkdir -p "$tmpdir"
+  tar -xzf "$tgz" -C "$tmpdir" || die "Failed to extract: $tgz"
+  [[ -f "${tmpdir}/backhaul" ]] || die "The archive does not contain 'backhaul' binary."
+  install -m 0755 "${tmpdir}/backhaul" "$CORE_INSTALL_PATH" || die "Failed to install core binary to ${CORE_INSTALL_PATH}"
+  rm -rf "$tmpdir"
+  set_core_version_local "$tag"
 }
 
+install_or_update_core(){
+  local arch
+  arch="$(detect_arch)"
+
+  local json tag url
+  json="$(github_latest_release_json)"
+  tag="$(extract_latest_tag "$json")"
+  [[ -n "$tag" ]] || die "Failed to parse latest release tag."
+  url="$(extract_download_url "$json" "$arch")"
+  [[ -n "$url" ]] || die "No matching asset found for linux_${arch}.tar.gz"
+
+  local current_tag
+  current_tag="$(core_version_local)"
+
+  if core_installed && [[ "$current_tag" == "$tag" ]]; then
+    ui_msg "$MANAGER_NAME" "Core is already up to date.\n\nInstalled: $current_tag\nLatest:    $tag"
+    rm -f "$json" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if core_installed; then
+    if ! ui_yesno "$MANAGER_NAME" "A core update is available.\n\nInstalled: $current_tag\nLatest:    $tag\n\nUpdate now?"; then
+      rm -f "$json" >/dev/null 2>&1 || true
+      return 0
+    fi
+  fi
+
+  # Offline option if present
+  local offline_tgz="${OFFLINE_DIR}/backhaul_linux_${arch}.tar.gz"
+  if [[ -d "$OFFLINE_DIR" && -f "$offline_tgz" ]]; then
+    if ui_yesno "$MANAGER_NAME" "Offline package found:\n$offline_tgz\n\nInstall/update using offline package?"; then
+      install_core_from_tgz "$offline_tgz" "$tag"
+      rm -f "$json" >/dev/null 2>&1 || true
+      ui_msg "$MANAGER_NAME" "Core installed/updated successfully (offline).\n\nNow: $tag"
+      return 0
+    fi
+  fi
+
+  local tgz="/tmp/backhaul_linux_${arch}.tar.gz"
+  download_file "$url" "$tgz" || die "Failed to download core release asset."
+  install_core_from_tgz "$tgz" "$tag"
+  rm -f "$tgz" "$json" >/dev/null 2>&1 || true
+
+  ui_msg "$MANAGER_NAME" "Core installed/updated successfully.\n\nNow: $tag"
+}
+
+########################################
+# Health-check (systemd timer/service)
+########################################
 install_health_units(){
-  # service: call manager in CLI mode to perform checks
+  # service
   if [[ ! -f "$HEALTH_SERVICE" ]]; then
     cat > "$HEALTH_SERVICE" <<EOF
 [Unit]
-Description=Backhaul Manager health check (ensure tunnels are running)
+Description=Backhaul Manager Health Check
 After=network-online.target
 Wants=network-online.target
 
@@ -427,15 +422,15 @@ ExecStart=${MANAGER_INSTALL_PATH} --health-check
 EOF
   fi
 
+  # timer
   if [[ ! -f "$HEALTH_TIMER" ]]; then
-    # default 5 minutes; can be rewritten by config menu
     cat > "$HEALTH_TIMER" <<'EOF'
 [Unit]
-Description=Run Backhaul Manager health check every 5 minutes
+Description=Run Backhaul Manager Health Check periodically
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitActiveSec=2min
 AccuracySec=30s
 Persistent=true
 
@@ -447,87 +442,59 @@ EOF
   systemd_reload
 }
 
-configure_health_timer(){
+enable_health_timer(){
   install_health_units
+  systemctl enable --now backhaul-manager-health.timer >/dev/null 2>&1 || die "Failed to enable health timer."
+  ui_msg "$MANAGER_NAME" "Health-check timer enabled.\n\nTimer: backhaul-manager-health.timer"
+}
 
-  if ! ui_yesno "$MANAGER_NAME" "Enable a real health-check using systemd timer?\n\nThis will periodically verify tunnel services and start them if they are not active.\n(You can still use cron periodic restart separately.)"; then
-    systemctl disable --now backhaul-manager-health.timer >/dev/null 2>&1 || true
-    ui_msg "$MANAGER_NAME" "Health-check timer disabled."
-    return 0
-  fi
-
-  local minutes
-  while true; do
-    minutes="$(ui_input "$MANAGER_NAME" "Health-check interval (minutes):" "5")" || return 1
-    [[ "$minutes" =~ ^[0-9]+$ ]] || { ui_msg "$MANAGER_NAME" "Invalid number."; continue; }
-    (( minutes >= 1 && minutes <= 1440 )) || { ui_msg "$MANAGER_NAME" "Please enter a value between 1 and 1440."; continue; }
-    break
-  done
-
-  # Rewrite timer file with requested interval
-  cat > "$HEALTH_TIMER" <<EOF
-[Unit]
-Description=Run Backhaul Manager health check every ${minutes} minutes
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=${minutes}min
-AccuracySec=30s
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemd_reload
-  systemctl enable --now backhaul-manager-health.timer >/dev/null 2>&1 || die "Failed to enable health-check timer."
-  ui_msg "$MANAGER_NAME" "Health-check timer enabled.\n\nInterval: ${minutes} minutes"
+disable_health_timer(){
+  systemctl disable --now backhaul-manager-health.timer >/dev/null 2>&1 || true
+  ui_msg "$MANAGER_NAME" "Health-check timer disabled."
 }
 
 health_check_run(){
-  # Ensure all defined tunnels have active systemd services; if not, try to start.
+  # Checks each backhaul@<tunnel> service. If inactive/failed -> restart.
   local tunnels
   tunnels="$(list_tunnels)"
   [[ -n "$tunnels" ]] || exit 0
 
-  local ok=0 fixed=0 fail=0
+  local t ok=0 fixed=0 fail=0
   while read -r t; do
     [[ -n "$t" ]] || continue
     local svc
     svc="$(service_name "$t")"
     if systemctl is-active --quiet "$svc"; then
       ((ok++))
-      continue
-    fi
-    # try start
-    if systemctl start "$svc" >/dev/null 2>&1; then
-      ((fixed++))
     else
-      ((fail++))
+      # attempt restart
+      if systemctl restart "$svc" >/dev/null 2>&1; then
+        ((fixed++))
+      else
+        ((fail++))
+      fi
     fi
   done <<< "$tunnels"
 
-  # Log to journal via logger if available
-  if cmd_exists logger; then
-    logger -t backhaul-manager "health-check: ok=${ok} fixed=${fixed} fail=${fail}"
-  fi
+  logger -t backhaul-manager "health-check: ok=${ok} fixed=${fixed} fail=${fail}"
+  exit 0
 }
 
 ########################################
-# Cron periodic restart (keep it)
+# Cron periodic restart (kept)
 ########################################
 setup_periodic_restart_cron(){
-  if ! ui_yesno "$MANAGER_NAME" "Configure periodic restart using cron?\n\nThis is optional. systemd already uses Restart=always.\n\nEnable cron periodic restart?"; then
+  if ! ui_yesno "$MANAGER_NAME" "Enable periodic restart using cron?\n(kept alongside systemd Restart=always)\n\nIf you choose No, cron will be removed."; then
     rm -f "$CRON_FILE" >/dev/null 2>&1 || true
-    ui_msg "$MANAGER_NAME" "Cron periodic restart disabled (cron file removed)."
+    ui_msg "$MANAGER_NAME" "Cron periodic restart disabled (cron removed if existed)."
     return 0
   fi
 
   local hours
   while true; do
-    hours="$(ui_input "$MANAGER_NAME" "Restart all tunnels every N hours:" "6")" || return 1
+    hours="$(ui_input "$MANAGER_NAME" "Restart all tunnels every N hours (1-168):" "6")" || return 1
     [[ "$hours" =~ ^[0-9]+$ ]] || { ui_msg "$MANAGER_NAME" "Invalid number."; continue; }
-    (( hours >= 1 && hours <= 168 )) || { ui_msg "$MANAGER_NAME" "Please enter a value between 1 and 168."; continue; }
+    (( hours >= 1 && hours <= 168 )) || { ui_msg "$MANAGER_NAME" "Please enter a number between 1 and 168."; continue; }
     break
   done
 
@@ -538,11 +505,11 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 0 */${hours} * * * root ${MANAGER_INSTALL_PATH} --restart-all >/dev/null 2>&1
 EOF
 
-  ui_msg "$MANAGER_NAME" "Cron periodic restart enabled.\n\nInterval: every ${hours} hour(s)"
+  ui_msg "$MANAGER_NAME" "Cron periodic restart configured.\n\nEvery ${hours} hours."
 }
 
 ########################################
-# Validation helpers
+# Validation / port checks
 ########################################
 valid_name(){
   [[ "$1" =~ ^[a-zA-Z0-9_-]{1,32}$ ]]
@@ -556,20 +523,20 @@ valid_port(){
 
 valid_hostport(){
   local v="$1"
-  # [ipv6]:port
   if [[ "$v" =~ ^\[[0-9a-fA-F:]+\]:[0-9]{1,5}$ ]]; then
-    valid_port "${v##*:}"
+    local p="${v##*:}"
+    valid_port "$p"
     return $?
   fi
-  # host:port (ipv4 or domain)
   if [[ "$v" =~ ^[^[:space:]]+:[0-9]{1,5}$ ]]; then
-    valid_port "${v##*:}"
+    local p="${v##*:}"
+    valid_port "$p"
     return $?
   fi
   return 1
 }
 
-port_in_use_running(){
+port_conflict_in_running(){
   local p="$1"
   if cmd_exists ss; then
     ss -lntup 2>/dev/null | awk '{print $5}' | grep -qE "[:\.]${p}$"
@@ -578,13 +545,25 @@ port_in_use_running(){
   return 1
 }
 
-collect_existing_listen_ports_from_configs(){
+tunnel_config_path(){
+  local name="$1"
+  echo "${TUNNELS_DIR}/${name}.toml"
+}
+
+tunnel_exists(){
+  local name="$1"
+  [[ -f "$(tunnel_config_path "$name")" ]]
+}
+
+service_name(){
+  local name="$1"
+  echo "backhaul@${name}.service"
+}
+
+collect_existing_ports_from_configs(){
   local f
   for f in "${TUNNELS_DIR}"/*.toml; do
     [[ -f "$f" ]] || continue
-    # bind_addr port
-    grep -E '^\s*bind_addr\s*=' "$f" | sed -E 's/.*"([^"]+)".*/\1/' | awk -F: '{print $NF}' | grep -E '^[0-9]+$' || true
-    # ports rules (best-effort)
     awk '
       BEGIN{inports=0}
       /^\s*ports\s*=\s*\[/{inports=1;next}
@@ -596,26 +575,57 @@ collect_existing_listen_ports_from_configs(){
         lhs=a[1];
         n=split(lhs,b,":");
         listen=b[n];
-        if (listen ~ /^[0-9]+$/){
-          print listen;
-        } else if (listen ~ /^[0-9]+-[0-9]+$/){
+        if (listen ~ /^[0-9]+-[0-9]+$/){
           split(listen,r,"-");
           print r[1]; print r[2];
+        } else if (listen ~ /^[0-9]+$/){
+          print listen;
         }
       }
     ' "$f" 2>/dev/null || true
   done
 }
 
-port_in_use_configs(){
+port_conflict_in_configs(){
   local p="$1"
-  collect_existing_listen_ports_from_configs | grep -qx "$p"
+  collect_existing_ports_from_configs | grep -qx "$p"
 }
 
 ensure_no_port_conflict(){
   local p="$1"
-  if port_in_use_configs "$p"; then return 1; fi
-  if port_in_use_running "$p"; then return 1; fi
+  if port_conflict_in_configs "$p"; then
+    return 1
+  fi
+  if port_conflict_in_running "$p"; then
+    return 1
+  fi
+  return 0
+}
+
+# Parse comma-separated port list like: "443, 80-90,8443"
+# Outputs normalized tokens (one per line) or returns non-zero on invalid.
+parse_port_list(){
+  local s="$1"
+  s="${s// /}"
+  [[ -n "$s" ]] || return 1
+  IFS=',' read -r -a parts <<< "$s"
+  local p
+  for p in "${parts[@]}"; do
+    [[ -n "$p" ]] || continue
+    if [[ "$p" =~ ^[0-9]+$ ]]; then
+      valid_port "$p" || return 1
+      echo "$p"
+    elif [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      local a="${BASH_REMATCH[1]}"
+      local b="${BASH_REMATCH[2]}"
+      valid_port "$a" || return 1
+      valid_port "$b" || return 1
+      (( a <= b )) || return 1
+      echo "$a-$b"
+    else
+      return 1
+    fi
+  done
   return 0
 }
 
@@ -630,13 +640,21 @@ ensure_certbot(){
   if cmd_exists certbot; then
     return 0
   fi
-  pm_install certbot >/dev/null 2>&1 || die "certbot is not installed and automatic installation failed. Please install certbot manually."
+  pm_install certbot >/dev/null 2>&1 || die "Failed to install certbot. Please install it manually."
 }
 
-check_port_80_free_or_warn(){
+check_port_80_free_or_die(){
   if cmd_exists ss; then
     if ss -lntp 2>/dev/null | awk '{print $4,$6}' | grep -qE '(:|\.)80[[:space:]]'; then
-      ui_text "$MANAGER_NAME" "Port 80 is currently in use.\n\nLet's Encrypt (standalone) requires port 80.\n\nPlease stop the service using port 80 (nginx/apache/etc.) and try again.\n\nExamples:\n- systemctl stop nginx\n- systemctl stop apache2 (or httpd)"
+      ui_textarea "$MANAGER_NAME" \
+"Port 80 is currently in use.
+
+Let's Encrypt (standalone) requires port 80 to be free.
+
+Please free port 80 and try again. Examples:
+- systemctl stop nginx
+- systemctl stop apache2
+- systemctl stop httpd"
       return 1
     fi
   fi
@@ -654,20 +672,20 @@ ssl_self_signed(){
     return 0
   fi
   openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
-    -keyout "$key" -out "$crt" -subj "/CN=${name}" >/dev/null 2>&1 || die "Failed to generate self-signed certificate."
-  chmod 600 "$key" >/dev/null 2>&1 || true
+    -keyout "$key" -out "$crt" -subj "/CN=${name}" >/dev/null 2>&1 || die "Failed to create self-signed certificate."
+  chmod 600 "$key" || true
   echo "$crt|$key"
 }
 
 ssl_import(){
   local crt key
   while true; do
-    crt="$(ui_input "$MANAGER_NAME" "Path to CERT file (e.g. fullchain.pem):" "")" || return 1
+    crt="$(ui_input "$MANAGER_NAME" "CERT file path (e.g. /etc/letsencrypt/live/.../fullchain.pem):" "")" || return 1
     [[ -f "$crt" ]] || { ui_msg "$MANAGER_NAME" "File not found: $crt"; continue; }
     break
   done
   while true; do
-    key="$(ui_input "$MANAGER_NAME" "Path to KEY file (e.g. privkey.pem):" "")" || return 1
+    key="$(ui_input "$MANAGER_NAME" "KEY file path (e.g. /etc/letsencrypt/live/.../privkey.pem):" "")" || return 1
     [[ -f "$key" ]] || { ui_msg "$MANAGER_NAME" "File not found: $key"; continue; }
     break
   done
@@ -677,7 +695,7 @@ ssl_import(){
 ssl_letsencrypt(){
   local name="$1"
   ensure_certbot
-  check_port_80_free_or_warn || return 1
+  check_port_80_free_or_die || return 1
 
   local domain email
   while true; do
@@ -694,51 +712,21 @@ ssl_letsencrypt(){
 
   certbot certonly --non-interactive --agree-tos \
     --email "$email" --standalone -d "$domain" \
-    || die "Let's Encrypt failed. Check DNS/Firewall and ensure port 80 is reachable."
+    || die "Let's Encrypt failed. Check DNS, firewall, and ensure port 80 is reachable."
 
   local crt="/etc/letsencrypt/live/${domain}/fullchain.pem"
   local key="/etc/letsencrypt/live/${domain}/privkey.pem"
-  [[ -f "$crt" && -f "$key" ]] || die "Let's Encrypt files not found after certbot."
+  [[ -f "$crt" && -f "$key" ]] || die "Certificate files not found after certbot run."
 
   safe_mkdir "${SSL_DIR}/${name}"
-  ln -sf "$crt" "${SSL_DIR}/${name}/fullchain.pem" >/dev/null 2>&1 || true
-  ln -sf "$key" "${SSL_DIR}/${name}/privkey.pem" >/dev/null 2>&1 || true
+  ln -sf "$crt" "${SSL_DIR}/${name}/fullchain.pem" || true
+  ln -sf "$key" "${SSL_DIR}/${name}/privkey.pem" || true
   echo "${SSL_DIR}/${name}/fullchain.pem|${SSL_DIR}/${name}/privkey.pem"
 }
 
 ########################################
-# Tunnel helpers
+# Tunnel config generation / ports rules
 ########################################
-tunnel_config_path(){
-  local name="$1"
-  echo "${TUNNELS_DIR}/${name}.toml"
-}
-
-tunnel_exists(){
-  local name="$1"
-  [[ -f "$(tunnel_config_path "$name")" ]]
-}
-
-service_name(){
-  local name="$1"
-  echo "backhaul@${name}.service"
-}
-
-list_tunnels(){
-  ls -1 "${TUNNELS_DIR}"/*.toml 2>/dev/null | sed -E 's#.*/##; s#\.toml$##' || true
-}
-
-tunnel_status(){
-  local name="$1"
-  local svc
-  svc="$(service_name "$name")"
-  if systemctl is-active --quiet "$svc"; then
-    echo "active"
-  else
-    echo "inactive"
-  fi
-}
-
 default_token(){
   if cmd_exists openssl; then
     openssl rand -hex 12 2>/dev/null
@@ -748,182 +736,338 @@ default_token(){
 }
 
 choose_role(){
-  ui_menu "$MANAGER_NAME" "Select tunnel role:" \
+  local sel
+  sel="$(ui_menu "$MANAGER_NAME" "Select tunnel role:" \
     "server" "Server" \
-    "client" "Client"
+    "client" "Client" \
+  )" || return 1
+  echo "$sel"
 }
 
 choose_transport(){
-  ui_menu "$MANAGER_NAME" "Select transport:" \
-    "tcp"    "TCP" \
+  local sel
+  sel="$(ui_menu "$MANAGER_NAME" "Select transport:" \
+    "tcp" "TCP" \
     "tcpmux" "TCP Multiplexing" \
-    "udp"    "UDP" \
-    "ws"     "WebSocket" \
-    "wss"    "Secure WebSocket (TLS)" \
-    "wsmux"  "WS Multiplexing" \
-    "wssmux" "WSS Multiplexing (TLS)"
+    "udp" "UDP" \
+    "ws" "WebSocket" \
+    "wss" "Secure WebSocket (TLS)" \
+    "wsmux" "WS Multiplexing" \
+    "wssmux" "WSS Multiplexing (TLS)" \
+  )" || return 1
+  echo "$sel"
 }
 
-# TOML read helpers (best-effort)
-toml_get_string(){
-  # toml_get_string <file> <key> => value (without quotes)
-  local file="$1" key="$2"
-  grep -E "^\s*${key}\s*=" "$file" 2>/dev/null | head -n1 | sed -E 's/.*=\s*"([^"]*)".*/\1/'
+# Create server ports rules based on:
+# - listen ports list (comma-separated, supports ranges)
+# - destination mode: none (just listen), or map to local port, or map to ip:port
+# Outputs TOML lines: "rule",
+build_ports_rules_from_portlist(){
+  local portlist="$1"
+  local mode="$2"      # none|local|remote
+  local target="$3"    # empty|5201|1.2.3.4:5201|domain:5201|[v6]:5201
+  local rules=()
+
+  # parse and validate port tokens
+  local token
+  while read -r token; do
+    [[ -n "$token" ]] || continue
+
+    # Conflict checks: for ranges, check both ends to avoid heavy scanning
+    if [[ "$token" =~ ^[0-9]+$ ]]; then
+      if ! ensure_no_port_conflict "$token"; then
+        ui_msg "$MANAGER_NAME" "Port conflict detected for listen port: $token\nRule not added."
+        continue
+      fi
+    else
+      # range A-B
+      local a="${token%-*}"
+      local b="${token#*-}"
+      if ! ensure_no_port_conflict "$a" || ! ensure_no_port_conflict "$b"; then
+        ui_msg "$MANAGER_NAME" "Port conflict detected in listen range: $token\n(At least start/end conflicts)\nRule not added."
+        continue
+      fi
+    fi
+
+    case "$mode" in
+      none)
+        rules+=("$token")
+        ;;
+      local)
+        rules+=("${token}=${target}")
+        ;;
+      remote)
+        rules+=("${token}=${target}")
+        ;;
+      *)
+        die "Invalid port rule mode."
+        ;;
+    esac
+  done < <(parse_port_list "$portlist" || true)
+
+  # Output as TOML lines
+  local out=""
+  local r
+  for r in "${rules[@]}"; do
+    out+="\"$r\",\n"
+  done
+  printf "%b" "$out"
 }
-toml_get_bool_or_num(){
-  local file="$1" key="$2"
-  grep -E "^\s*${key}\s*=" "$file" 2>/dev/null | head -n1 | sed -E 's/.*=\s*([^#]+).*/\1/' | tr -d '[:space:]'
+
+collect_ports_rules_wizard(){
+  ui_textarea "$MANAGER_NAME" \
+"Ports rules wizard (Server only)
+
+You can add multiple listen ports in one line:
+  - Single ports: 443,8443
+  - Ranges: 80-90
+  - Mix: 443,80-90,8443
+
+Then choose how to map them (optional):
+  - No mapping: \"443\" or \"80-90\"
+  - Map to local port: \"443=5201\"
+  - Map to remote host:port: \"443=1.1.1.1:5201\" or \"443=example.com:5201\" or \"443=[2001:db8::1]:5201\"
+
+You can repeat and add more groups. Choose Done to finish."
+
+  local rules_lines=""
+  while true; do
+    local action
+    action="$(ui_menu "$MANAGER_NAME" "Ports rules wizard:" \
+      "1" "Add ports (comma-separated list)" \
+      "2" "Done" \
+    )" || return 1
+
+    case "$action" in
+      1)
+        local portlist
+        while true; do
+          portlist="$(ui_input "$MANAGER_NAME" "Listen ports (e.g. 443,80-90,8443):" "")" || return 1
+          if parse_port_list "$portlist" >/dev/null 2>&1; then
+            break
+          fi
+          ui_msg "$MANAGER_NAME" "Invalid format. Examples:\n443\n443,8443\n80-90\n443,80-90,8443"
+        done
+
+        local mode
+        mode="$(ui_menu "$MANAGER_NAME" "Mapping type for this ports group:" \
+          "none"  "No mapping (just listen)" \
+          "local" "Map to a local port (e.g. 5201)" \
+          "remote" "Map to a remote host:port (IP/domain/IPv6)" \
+        )" || return 1
+
+        local target=""
+        if [[ "$mode" == "local" ]]; then
+          while true; do
+            target="$(ui_input "$MANAGER_NAME" "Target local port (e.g. 5201):" "5201")" || return 1
+            valid_port "$target" && break
+            ui_msg "$MANAGER_NAME" "Invalid port."
+          done
+        elif [[ "$mode" == "remote" ]]; then
+          while true; do
+            target="$(ui_input "$MANAGER_NAME" "Target host:port (e.g. 1.1.1.1:5201 or example.com:5201 or [v6]:5201):" "")" || return 1
+            valid_hostport "$target" && break
+            ui_msg "$MANAGER_NAME" "Invalid host:port format."
+          done
+        fi
+
+        local new_lines
+        new_lines="$(build_ports_rules_from_portlist "$portlist" "$mode" "$target")"
+        if [[ -z "$new_lines" ]]; then
+          ui_msg "$MANAGER_NAME" "No rules were added (possible conflicts)."
+        else
+          rules_lines+="$new_lines"
+          ui_msg "$MANAGER_NAME" "Rules added."
+        fi
+        ;;
+      2) break ;;
+      *) ;;
+    esac
+  done
+
+  printf "%b" "$rules_lines"
 }
-toml_detect_role(){
-  local file="$1"
-  if grep -q '^\[server\]' "$file" 2>/dev/null; then echo "server"; else echo "client"; fi
-}
-toml_get_transport(){
-  local file="$1"
-  toml_get_string "$file" "transport"
-}
-toml_extract_ports_csv(){
-  local file="$1"
-  # Extract ports array items into CSV
+
+extract_ports_rules_from_config(){
+  local cfg="$1"
+  # outputs one rule per line (raw string without quotes/commas)
   awk '
-    BEGIN{inports=0; first=1}
+    BEGIN{inports=0}
     /^\s*ports\s*=\s*\[/{inports=1;next}
     inports==1{
       if ($0 ~ /\]/){inports=0;next}
-      line=$0
-      gsub(/^[[:space:]]+/, "", line)
-      gsub(/[[:space:]]+$/, "", line)
-      gsub(/,/, "", line)
-      if (match(line, /^"([^"]+)"$/, m)){
-        if (first==0) printf(",")
-        printf("%s", m[1])
-        first=0
-      }
+      gsub(/"|,/, "", $0); gsub(/^[[:space:]]+/, "", $0); gsub(/[[:space:]]+$/, "", $0);
+      if (length($0)>0) print $0;
     }
-  ' "$file" 2>/dev/null
+  ' "$cfg" 2>/dev/null || true
 }
 
-parse_rules_csv_to_array(){
-  # input: "a,b,c" => prints each trimmed on newline
-  local csv="$1"
-  # split by comma
-  awk -v s="$csv" 'BEGIN{
-    n=split(s,a,",");
-    for(i=1;i<=n;i++){
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[i]);
-      if(length(a[i])>0) print a[i];
+rewrite_ports_block_in_config(){
+  local cfg="$1"
+  local new_lines="$2"
+
+  # Remove existing ports block then append new one at end (server config)
+  local tmp="/tmp/bhm_cfg_$$.toml"
+  awk '
+    BEGIN{inports=0}
+    /^\s*ports\s*=\s*\[/{inports=1;next}
+    inports==1{
+      if ($0 ~ /\]/){inports=0}
+      next
     }
-  }'
+    {print}
+  ' "$cfg" > "$tmp"
+
+  # Append ports block
+  cat >> "$tmp" <<EOF
+
+ports = [
+$(printf "%b" "$new_lines")
+]
+EOF
+
+  mv "$tmp" "$cfg"
+  chmod 600 "$cfg" || true
 }
 
-validate_rule_and_check_ports(){
-  local rule="$1"
-  # Extract listening part: before '=' then last segment after ':'
-  local lhs="${rule%%=*}"
-  local listen="${lhs##*:}"
-  if [[ "$listen" =~ ^[0-9]+$ ]]; then
-    ensure_no_port_conflict "$listen" || return 1
-  elif [[ "$listen" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-    local s="${BASH_REMATCH[1]}" e="${BASH_REMATCH[2]}"
-    valid_port "$s" || return 1
-    valid_port "$e" || return 1
-    (( s <= e )) || return 1
-    # Check endpoints only (fast). You can tighten later if you want full scan.
-    ensure_no_port_conflict "$s" || return 1
-    ensure_no_port_conflict "$e" || return 1
-  else
-    # Unknown, accept (cannot reliably check). Return success.
+ports_manage_interactive(){
+  local name="$1"
+  local cfg
+  cfg="$(tunnel_config_path "$name")"
+  [[ -f "$cfg" ]] || { ui_msg "$MANAGER_NAME" "Config not found."; return 1; }
+
+  if ! grep -q '^\[server\]' "$cfg"; then
+    ui_msg "$MANAGER_NAME" "This tunnel is not a server tunnel. Ports rules apply to server config."
     return 0
   fi
-  return 0
-}
 
-collect_ports_rules_csv(){
-  # Allow single port / range, multiple entries comma-separated.
-  # Return CSV string
-  local default_csv="${1:-}"
+  local rules=()
+  local line
+  while read -r line; do
+    [[ -n "$line" ]] || continue
+    rules+=("$line")
+  done < <(extract_ports_rules_from_config "$cfg")
+
   while true; do
-    local csv
-    csv="$(ui_input "$MANAGER_NAME" "Enter port rules (comma-separated). Empty = no rules.\nExamples:\n  443\n  4000=5000\n  127.0.0.2:443=1.1.1.1:5201\n  443-600\n\nRules:" "$default_csv")" || return 1
-    # empty allowed
-    if [[ -z "$csv" ]]; then
-      echo ""
-      return 0
+    local preview="Current rules:\n"
+    if (( ${#rules[@]} == 0 )); then
+      preview+="(none)\n"
+    else
+      local i=1
+      local r
+      for r in "${rules[@]}"; do
+        preview+="$i) $r\n"
+        ((i++))
+      done
     fi
 
-    local ok=1
-    while read -r r; do
-      [[ -n "$r" ]] || continue
-      if ! validate_rule_and_check_ports "$r"; then
-        ok=0
-        ui_msg "$MANAGER_NAME" "Port conflict or invalid port range detected for rule:\n$r\n\nPlease change it."
-        break
-      fi
-    done < <(parse_rules_csv_to_array "$csv")
+    local sel
+    sel="$(ui_menu "$MANAGER_NAME" "$(printf "%b" "$preview")\nChoose action:" \
+      "1" "Add rules (comma-separated ports list wizard)" \
+      "2" "Remove a rule (by number)" \
+      "3" "Save and exit" \
+      "0" "Cancel" \
+    )" || return 1
 
-    if (( ok == 1 )); then
-      echo "$csv"
-      return 0
-    fi
+    case "$sel" in
+      1)
+        # Use wizard to create new rules lines; then parse them into array
+        local new_lines
+        new_lines="$(collect_ports_rules_wizard)"
+        if [[ -n "$new_lines" ]]; then
+          # new_lines are quoted TOML lines; convert back to raw rule strings
+          while read -r l; do
+            l="${l//\"/}"
+            l="${l//,/}"
+            l="$(echo "$l" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+            [[ -n "$l" ]] && rules+=("$l")
+          done < <(printf "%b" "$new_lines")
+        fi
+        ;;
+      2)
+        if (( ${#rules[@]} == 0 )); then
+          ui_msg "$MANAGER_NAME" "No rules to remove."
+          continue
+        fi
+        local idx
+        while true; do
+          idx="$(ui_input "$MANAGER_NAME" "Enter rule number to remove:" "1")" || return 1
+          [[ "$idx" =~ ^[0-9]+$ ]] || { ui_msg "$MANAGER_NAME" "Invalid number."; continue; }
+          (( idx >= 1 && idx <= ${#rules[@]} )) || { ui_msg "$MANAGER_NAME" "Out of range."; continue; }
+          break
+        done
+        unset 'rules[idx-1]'
+        # re-pack
+        local tmp=()
+        local r
+        for r in "${rules[@]}"; do tmp+=("$r"); done
+        rules=("${tmp[@]}")
+        ui_msg "$MANAGER_NAME" "Rule removed."
+        ;;
+      3)
+        # build TOML lines
+        local out=""
+        local r
+        for r in "${rules[@]}"; do
+          out+="\"$r\",\n"
+        done
+        rewrite_ports_block_in_config "$cfg" "$out"
+        systemd_reload
+        systemctl restart "$(service_name "$name")" >/dev/null 2>&1 || true
+        ui_msg "$MANAGER_NAME" "Ports rules saved and service restarted."
+        return 0
+        ;;
+      0) return 0 ;;
+      *) ;;
+    esac
   done
 }
 
 write_tunnel_config(){
-  # write_tunnel_config <name> <role> <transport> [existing_cfg_for_defaults]
   local name="$1"
   local role="$2"
   local transport="$3"
-  local existing="${4:-}"
   local cfg
   cfg="$(tunnel_config_path "$name")"
 
-  local token keepalive heartbeat channel_size nodelay web_port log_level
-  local bind_addr remote_addr edge_ip
+  local token bind_addr remote_addr edge_ip
+  local keepalive heartbeat channel_size nodelay web_port log_level
   local connection_pool aggressive_pool dial_timeout retry_interval
-
-  # Defaults (Iran-friendly)
-  local def_token def_keepalive def_heartbeat def_channel def_nodelay def_web_port def_log
-  def_token="$(default_token)"
-  def_keepalive="75"
-  def_heartbeat="40"
-  def_channel="2048"
-  def_nodelay="true"
-  def_web_port="0"
-  def_log="info"
-
-  if [[ -n "$existing" && -f "$existing" ]]; then
-    def_token="$(toml_get_string "$existing" "token")"; [[ -z "$def_token" ]] && def_token="$(default_token)"
-    def_keepalive="$(toml_get_bool_or_num "$existing" "keepalive_period")"; [[ -z "$def_keepalive" ]] && def_keepalive="75"
-    def_heartbeat="$(toml_get_bool_or_num "$existing" "heartbeat")"; [[ -z "$def_heartbeat" ]] && def_heartbeat="40"
-    def_channel="$(toml_get_bool_or_num "$existing" "channel_size")"; [[ -z "$def_channel" ]] && def_channel="2048"
-    def_nodelay="$(toml_get_bool_or_num "$existing" "nodelay")"; [[ -z "$def_nodelay" ]] && def_nodelay="true"
-    def_web_port="$(toml_get_bool_or_num "$existing" "web_port")"; [[ -z "$def_web_port" ]] && def_web_port="0"
-    def_log="$(toml_get_string "$existing" "log_level")"; [[ -z "$def_log" ]] && def_log="info"
-  fi
-
-  token="$(ui_input "$MANAGER_NAME" "Token:" "$def_token")" || return 1
-  keepalive="$(ui_input "$MANAGER_NAME" "keepalive_period (seconds):" "$def_keepalive")" || return 1
-  heartbeat="$(ui_input "$MANAGER_NAME" "heartbeat (seconds):" "$def_heartbeat")" || return 1
-  channel_size="$(ui_input "$MANAGER_NAME" "channel_size:" "$def_channel")" || return 1
-  nodelay="$(ui_input "$MANAGER_NAME" "nodelay (true/false):" "$def_nodelay")" || return 1
-  web_port="$(ui_input "$MANAGER_NAME" "web_port (0 disables):" "$def_web_port")" || return 1
-  log_level="$(ui_input "$MANAGER_NAME" "log_level (debug/info/warn/error):" "$def_log")" || return 1
-
+  local mux_con mux_version mux_framesize mux_recievebuffer mux_streambuffer
   local tls_cert="" tls_key=""
 
+  token="$(ui_input "$MANAGER_NAME" "Token (Enter for random default):" "$(default_token)")" || return 1
+
+  keepalive="$(ui_input "$MANAGER_NAME" "keepalive_period (seconds):" "75")" || return 1
+  channel_size="$(ui_input "$MANAGER_NAME" "channel_size:" "2048")" || return 1
+  nodelay="$(ui_input "$MANAGER_NAME" "nodelay (true/false):" "true")" || return 1
+  web_port="$(ui_input "$MANAGER_NAME" "web_port (0=disabled):" "0")" || return 1
+  log_level="$(ui_input "$MANAGER_NAME" "log_level (debug/info/warn/error):" "info")" || return 1
+
+  heartbeat="$(ui_input "$MANAGER_NAME" "heartbeat (seconds):" "40")" || return 1
+
+  mux_con="8"
+  mux_version="1"
+  mux_framesize="32768"
+  mux_recievebuffer="4194304"
+  mux_streambuffer="65536"
+
+  # TLS if needed
   if [[ "$transport" == "wss" || "$transport" == "wssmux" ]]; then
     if [[ "$role" == "server" ]]; then
       local sslsel
-      sslsel="$(ui_menu "$MANAGER_NAME" "TLS mode:" \
-        "self"   "Self-signed" \
-        "le"     "Let's Encrypt (requires free port 80 + domain)" \
-        "import" "Import cert/key paths")" || return 1
+      sslsel="$(ui_menu "$MANAGER_NAME" "TLS option (Server):" \
+        "self" "Self-signed (quick)" \
+        "le" "Let's Encrypt (requires free port 80 + domain)" \
+        "import" "Import existing cert/key paths" \
+      )" || return 1
+
       local pair
       case "$sslsel" in
         self) pair="$(ssl_self_signed "$name")" ;;
         le) pair="$(ssl_letsencrypt "$name")" ;;
         import) pair="$(ssl_import)" ;;
-        *) die "Invalid TLS selection." ;;
+        *) die "Invalid TLS option." ;;
       esac
       tls_cert="${pair%%|*}"
       tls_key="${pair##*|}"
@@ -931,21 +1075,11 @@ write_tunnel_config(){
   fi
 
   if [[ "$role" == "server" ]]; then
-    local def_bind def_ports_csv
-    def_bind="0.0.0.0:3080"
-    def_ports_csv=""
-    if [[ -n "$existing" && -f "$existing" ]]; then
-      local x
-      x="$(toml_get_string "$existing" "bind_addr")"
-      [[ -n "$x" ]] && def_bind="$x"
-      def_ports_csv="$(toml_extract_ports_csv "$existing")"
-    fi
-
     while true; do
-      bind_addr="$(ui_input "$MANAGER_NAME" "bind_addr (e.g. 0.0.0.0:3080 or [::]:3080):" "$def_bind")" || return 1
+      bind_addr="$(ui_input "$MANAGER_NAME" "bind_addr (e.g. 0.0.0.0:3080 or [::]:3080):" "0.0.0.0:3080")" || return 1
       if [[ "$bind_addr" =~ ^\[[0-9a-fA-F:]+\]:[0-9]{1,5}$ ]] || [[ "$bind_addr" =~ ^[^[:space:]]+:[0-9]{1,5}$ ]]; then
         local p="${bind_addr##*:}"
-        valid_port "$p" || { ui_msg "$MANAGER_NAME" "Invalid port in bind_addr."; continue; }
+        valid_port "$p" || { ui_msg "$MANAGER_NAME" "Invalid bind port."; continue; }
         if ! ensure_no_port_conflict "$p"; then
           ui_msg "$MANAGER_NAME" "Port conflict detected for bind_addr port: $p"
           continue
@@ -955,10 +1089,9 @@ write_tunnel_config(){
       ui_msg "$MANAGER_NAME" "Invalid bind_addr format."
     done
 
-    local ports_csv
-    ports_csv="$(collect_ports_rules_csv "$def_ports_csv")" || return 1
+    local ports_lines
+    ports_lines="$(collect_ports_rules_wizard)"
 
-    # Write server config
     cat > "$cfg" <<EOF
 [server]
 bind_addr = "${bind_addr}"
@@ -969,11 +1102,11 @@ keepalive_period = ${keepalive}
 nodelay = ${nodelay}
 heartbeat = ${heartbeat}
 channel_size = ${channel_size}
-mux_con = 8
-mux_version = 1
-mux_framesize = 32768
-mux_recievebuffer = 4194304
-mux_streambuffer = 65536
+mux_con = ${mux_con}
+mux_version = ${mux_version}
+mux_framesize = ${mux_framesize}
+mux_recievebuffer = ${mux_recievebuffer}
+mux_streambuffer = ${mux_streambuffer}
 sniffer = false
 web_port = ${web_port}
 sniffer_log = "${LOG_DIR}/${name}.json"
@@ -987,51 +1120,29 @@ tls_key = "${tls_key}"
 EOF
     fi
 
-    echo "ports = [" >> "$cfg"
-    if [[ -n "$ports_csv" ]]; then
-      while read -r r; do
-        [[ -n "$r" ]] || continue
-        echo "  \"${r}\"," >> "$cfg"
-      done < <(parse_rules_csv_to_array "$ports_csv")
-    fi
-    echo "]" >> "$cfg"
+    cat >> "$cfg" <<EOF
+ports = [
+$(printf "%b" "$ports_lines")
+]
+EOF
 
   else
-    # client
-    local def_remote def_edge def_pool def_aggr def_dial def_retry
-    def_remote="0.0.0.0:3080"
-    def_edge=""
-    def_pool="8"
-    def_aggr="false"
-    def_dial="10"
-    def_retry="3"
-
-    if [[ -n "$existing" && -f "$existing" ]]; then
-      local x
-      x="$(toml_get_string "$existing" "remote_addr")"; [[ -n "$x" ]] && def_remote="$x"
-      x="$(toml_get_string "$existing" "edge_ip")"; [[ -n "$x" ]] && def_edge="$x"
-      x="$(toml_get_bool_or_num "$existing" "connection_pool")"; [[ -n "$x" ]] && def_pool="$x"
-      x="$(toml_get_bool_or_num "$existing" "aggressive_pool")"; [[ -n "$x" ]] && def_aggr="$x"
-      x="$(toml_get_bool_or_num "$existing" "dial_timeout")"; [[ -n "$x" ]] && def_dial="$x"
-      x="$(toml_get_bool_or_num "$existing" "retry_interval")"; [[ -n "$x" ]] && def_retry="$x"
-    fi
-
     while true; do
-      remote_addr="$(ui_input "$MANAGER_NAME" "remote_addr (IPv4/IPv6/Domain) e.g. 1.2.3.4:3080 or example.com:443 or [2001:db8::1]:3080:" "$def_remote")" || return 1
+      remote_addr="$(ui_input "$MANAGER_NAME" "remote_addr (IPv4/IPv6/Domain) e.g. 1.2.3.4:3080 or example.com:443 or [v6]:3080:" "0.0.0.0:3080")" || return 1
       valid_hostport "$remote_addr" && break
       ui_msg "$MANAGER_NAME" "Invalid remote_addr format."
     done
 
     if [[ "$transport" == "ws" || "$transport" == "wss" || "$transport" == "wsmux" || "$transport" == "wssmux" ]]; then
-      edge_ip="$(ui_input "$MANAGER_NAME" "edge_ip (optional):" "$def_edge")" || return 1
+      edge_ip="$(ui_input "$MANAGER_NAME" "edge_ip (optional, Enter to skip):" "")" || return 1
     else
       edge_ip=""
     fi
 
-    connection_pool="$(ui_input "$MANAGER_NAME" "connection_pool:" "$def_pool")" || return 1
-    aggressive_pool="$(ui_input "$MANAGER_NAME" "aggressive_pool (true/false):" "$def_aggr")" || return 1
-    dial_timeout="$(ui_input "$MANAGER_NAME" "dial_timeout (seconds):" "$def_dial")" || return 1
-    retry_interval="$(ui_input "$MANAGER_NAME" "retry_interval (seconds):" "$def_retry")" || return 1
+    connection_pool="$(ui_input "$MANAGER_NAME" "connection_pool:" "8")" || return 1
+    aggressive_pool="$(ui_input "$MANAGER_NAME" "aggressive_pool (true/false):" "false")" || return 1
+    dial_timeout="$(ui_input "$MANAGER_NAME" "dial_timeout (seconds):" "10")" || return 1
+    retry_interval="$(ui_input "$MANAGER_NAME" "retry_interval (seconds):" "3")" || return 1
 
     cat > "$cfg" <<EOF
 [client]
@@ -1056,26 +1167,73 @@ EOF
 
     if [[ "$transport" == "tcpmux" || "$transport" == "wsmux" || "$transport" == "wssmux" ]]; then
       cat >> "$cfg" <<EOF
-mux_version = 1
-mux_framesize = 32768
-mux_recievebuffer = 4194304
-mux_streambuffer = 65536
+mux_version = ${mux_version}
+mux_framesize = ${mux_framesize}
+mux_recievebuffer = ${mux_recievebuffer}
+mux_streambuffer = ${mux_streambuffer}
 EOF
     fi
   fi
 
-  chmod 600 "$cfg" >/dev/null 2>&1 || true
+  chmod 600 "$cfg" || true
+}
+
+########################################
+# Tunnels listing / status
+########################################
+list_tunnels(){
+  ls -1 "${TUNNELS_DIR}"/*.toml 2>/dev/null | sed -E 's#.*/##; s#\.toml$##' || true
+}
+
+tunnel_status_text(){
+  local name="$1"
+  local svc
+  svc="$(service_name "$name")"
+  if systemctl is-active --quiet "$svc"; then
+    echo "active"
+  else
+    echo "inactive"
+  fi
+}
+
+########################################
+# Main actions: install/setup, create, manage, restart all, uninstall
+########################################
+install_everything(){
+  ensure_prereqs
+  init_ui
+  install_system_layout
+  install_systemd_template
+  install_manager_self
+
+  # Install or update core (always check)
+  install_or_update_core
+
+  # Ensure health units are available (not forced enabled)
+  install_health_units
+
+  ui_msg "$MANAGER_NAME" \
+"Setup completed.
+
+Manager command: ${MANAGER_CMD}
+Manager repo:    ${MANAGER_REPO_URL}
+
+Core runtime version output:
+$(core_version_runtime)
+
+Core tag tracking:
+$(core_version_local)"
 }
 
 create_tunnel(){
-  core_installed || { ui_msg "$MANAGER_NAME" "Core is not installed. Please install/update core first."; return 1; }
+  core_installed || { ui_msg "$MANAGER_NAME" "Core is not installed. Choose 'Core install/update' first."; return 1; }
 
   local name
   while true; do
-    name="$(ui_input "$MANAGER_NAME" "Tunnel name (a-zA-Z0-9_- up to 32 chars):" "")" || return 1
+    name="$(ui_input "$MANAGER_NAME" "Tunnel name (a-zA-Z0-9_- , max 32):" "")" || return 1
     valid_name "$name" || { ui_msg "$MANAGER_NAME" "Invalid tunnel name."; continue; }
     if tunnel_exists "$name"; then
-      ui_msg "$MANAGER_NAME" "This tunnel name already exists."
+      ui_msg "$MANAGER_NAME" "Tunnel name already exists."
       continue
     fi
     break
@@ -1085,13 +1243,21 @@ create_tunnel(){
   role="$(choose_role)" || return 1
   transport="$(choose_transport)" || return 1
 
-  write_tunnel_config "$name" "$role" "$transport" "" || return 1
+  write_tunnel_config "$name" "$role" "$transport" || return 1
 
   systemd_reload
   systemctl enable "$(service_name "$name")" >/dev/null 2>&1 || true
   systemctl restart "$(service_name "$name")" >/dev/null 2>&1 || true
 
-  ui_msg "$MANAGER_NAME" "Tunnel created:\n\nName: $name\nRole: $role\nTransport: $transport\nService: $(service_name "$name")"
+  ui_msg "$MANAGER_NAME" \
+"Tunnel created.
+
+Name:      $name
+Role:      $role
+Transport: $transport
+
+Service:
+$(service_name "$name")"
 }
 
 edit_tunnel(){
@@ -1101,32 +1267,45 @@ edit_tunnel(){
   [[ -f "$cfg" ]] || { ui_msg "$MANAGER_NAME" "Config not found."; return 1; }
 
   local role transport
-  role="$(toml_detect_role "$cfg")"
-  transport="$(toml_get_transport "$cfg")"
-  [[ -z "$transport" ]] && transport="tcp"
+  if grep -q '^\[server\]' "$cfg"; then role="server"; else role="client"; fi
+  transport="$(grep -E '^\s*transport\s*=' "$cfg" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')" || true
+  [[ -n "$transport" ]] || transport="tcp"
 
-  if ui_yesno "$MANAGER_NAME" "Edit using interactive wizard?\n\nYes: Wizard (supports add/remove ports via comma-separated rules)\nNo: Open editor (nano/vi)"; then
-    write_tunnel_config "$name" "$role" "$transport" "$cfg" || return 1
-  else
-    if cmd_exists nano; then
-      nano "$cfg"
-    else
-      vi "$cfg"
-    fi
-  fi
+  local sel
+  sel="$(ui_menu "$MANAGER_NAME" "Edit tunnel: $name" \
+    "1" "Interactive rewrite (keeps role/transport, asks all fields again)" \
+    "2" "Edit ports rules (server only: add/remove)" \
+    "3" "Open config file in editor (nano/vi)" \
+    "0" "Back" \
+  )" || return 1
 
-  systemd_reload
-  systemctl restart "$(service_name "$name")" >/dev/null 2>&1 || true
-  ui_msg "$MANAGER_NAME" "Tunnel updated and service restarted."
+  case "$sel" in
+    1)
+      write_tunnel_config "$name" "$role" "$transport" || return 1
+      systemd_reload
+      systemctl restart "$(service_name "$name")" >/dev/null 2>&1 || true
+      ui_msg "$MANAGER_NAME" "Config updated and service restarted."
+      ;;
+    2)
+      ports_manage_interactive "$name"
+      ;;
+    3)
+      if cmd_exists nano; then nano "$cfg"; else vi "$cfg"; fi
+      systemd_reload
+      systemctl restart "$(service_name "$name")" >/dev/null 2>&1 || true
+      ui_msg "$MANAGER_NAME" "Editor closed. Service restarted."
+      ;;
+    0) ;;
+  esac
 }
 
 delete_tunnel(){
   local name="$1"
-  if ! ui_yesno "$MANAGER_NAME" "Delete tunnel '$name'?\n\nThis removes config, service instance and related SSL files."; then
+  if ! ui_yesno "$MANAGER_NAME" "Delete tunnel '$name'?\nThis removes config, service, and SSL files for this tunnel."; then
     return 0
   fi
   systemctl disable --now "$(service_name "$name")" >/dev/null 2>&1 || true
-  rm -f "$(tunnel_config_path "$name")" >/dev/null 2>&1 || true
+  rm -f "$(tunnel_config_path "$name")" || true
   rm -rf "${SSL_DIR}/${name}" >/dev/null 2>&1 || true
   systemd_reload
   ui_msg "$MANAGER_NAME" "Tunnel deleted."
@@ -1138,7 +1317,7 @@ show_logs(){
   svc="$(service_name "$name")"
   if cmd_exists journalctl; then
     journalctl -u "$svc" -n 120 --no-pager | sed 's/\x1b\[[0-9;]*m//g' > "/tmp/${svc}.log" || true
-    ui_text "$MANAGER_NAME" "$(cat "/tmp/${svc}.log" 2>/dev/null || echo "No logs available.")"
+    ui_textarea "$MANAGER_NAME" "$(cat "/tmp/${svc}.log" 2>/dev/null || echo "No logs available.")"
   else
     ui_msg "$MANAGER_NAME" "journalctl not available."
   fi
@@ -1147,17 +1326,19 @@ show_logs(){
 manage_tunnel_actions(){
   local name="$1"
   while true; do
-    local status sel
-    status="$(tunnel_status "$name")"
-    sel="$(ui_menu "$MANAGER_NAME" "Manage: $name (status: $status)" \
+    local status
+    status="$(tunnel_status_text "$name")"
+    local sel
+    sel="$(ui_menu "$MANAGER_NAME" "Tunnel: $name (status: $status)" \
       "1" "Start" \
       "2" "Stop" \
       "3" "Restart" \
-      "4" "Status (systemctl)" \
+      "4" "Status details" \
       "5" "Edit" \
       "6" "Logs (last 120 lines)" \
       "7" "Delete" \
-      "0" "Back")" || return 1
+      "0" "Back" \
+    )" || return 1
 
     case "$sel" in
       1) systemctl start "$(service_name "$name")" >/dev/null 2>&1 || ui_msg "$MANAGER_NAME" "Start failed." ;;
@@ -1165,7 +1346,7 @@ manage_tunnel_actions(){
       3) systemctl restart "$(service_name "$name")" >/dev/null 2>&1 || ui_msg "$MANAGER_NAME" "Restart failed." ;;
       4)
         systemctl status "$(service_name "$name")" --no-pager | sed 's/\x1b\[[0-9;]*m//g' > "/tmp/bhm_status_${name}.txt" || true
-        ui_text "$MANAGER_NAME" "$(cat "/tmp/bhm_status_${name}.txt" 2>/dev/null)"
+        ui_textarea "$MANAGER_NAME" "$(cat "/tmp/bhm_status_${name}.txt" 2>/dev/null || echo "No status output.")"
         ;;
       5) edit_tunnel "$name" ;;
       6) show_logs "$name" ;;
@@ -1176,15 +1357,16 @@ manage_tunnel_actions(){
   done
 }
 
-manage_tunnels_menu(){
+manage_tunnel_menu(){
   local tunnels
   tunnels="$(list_tunnels)"
   [[ -n "$tunnels" ]] || { ui_msg "$MANAGER_NAME" "No tunnels found."; return 0; }
 
-  local args=() t
+  local args=()
+  local t
   while read -r t; do
     [[ -n "$t" ]] || continue
-    args+=("$t" "status: $(tunnel_status "$t")")
+    args+=("$t" "status: $(tunnel_status_text "$t")")
   done <<< "$tunnels"
 
   local sel
@@ -1206,15 +1388,11 @@ restart_all_tunnels(){
       ((fail++))
     fi
   done <<< "$tunnels"
-
-  ui_msg "$MANAGER_NAME" "Restart all completed.\n\nOK: $ok\nFailed: $fail"
+  ui_msg "$MANAGER_NAME" "Restart all completed.\nSuccess: $ok\nFailed:  $fail"
 }
 
-########################################
-# Uninstall
-########################################
 uninstall_all(){
-  if ! ui_yesno "$MANAGER_NAME" "Uninstall Backhaul Manager completely?\n\nThis removes tunnels, configs, services, SSL files, health timer, cron, and manager command."; then
+  if ! ui_yesno "$MANAGER_NAME" "Full uninstall?\nThis removes ALL tunnels, configs, services, SSL files, cron, and health timer."; then
     return 0
   fi
 
@@ -1227,19 +1405,20 @@ uninstall_all(){
     done <<< "$tunnels"
   fi
 
-  # Remove health timer/service
-  systemctl disable --now backhaul-manager-health.timer >/dev/null 2>&1 || true
+  disable_health_timer || true
   rm -f "$HEALTH_TIMER" "$HEALTH_SERVICE" >/dev/null 2>&1 || true
 
-  rm -f "$CRON_FILE" >/dev/null 2>&1 || true
   rm -f "$SYSTEMD_TEMPLATE" >/dev/null 2>&1 || true
-  rm -rf "$BASE_DIR" >/dev/null 2>&1 || true
-  rm -rf "$LOG_DIR" >/dev/null 2>&1 || true
-  rm -f "$MANAGER_INSTALL_PATH" >/dev/null 2>&1 || true
-
   systemd_reload
 
-  if ui_yesno "$MANAGER_NAME" "Also remove core binary (${CORE_BIN_NAME})?"; then
+  rm -f "$CRON_FILE" >/dev/null 2>&1 || true
+
+  rm -rf "$BASE_DIR" >/dev/null 2>&1 || true
+  rm -rf "$LOG_DIR" >/dev/null 2>&1 || true
+
+  rm -f "$MANAGER_INSTALL_PATH" >/dev/null 2>&1 || true
+
+  if ui_yesno "$MANAGER_NAME" "Remove core binary (${CORE_INSTALL_PATH}) too?"; then
     rm -f "$CORE_INSTALL_PATH" >/dev/null 2>&1 || true
   fi
 
@@ -1247,36 +1426,48 @@ uninstall_all(){
 }
 
 ########################################
-# Setup / Install everything
-########################################
-setup_all(){
-  ensure_prereqs
-  init_ui
-  install_system_layout
-  install_systemd_template
-  install_manager_self
-  install_or_update_core
-  install_health_units
-  ui_msg "$MANAGER_NAME" "Setup completed.\n\nCommand: ${MANAGER_CMD}\nCore version output:\n$(core_version_raw)"
-}
-
-########################################
-# Header / status
+# Header / About
 ########################################
 tunnels_count(){
-  ls -1 "${TUNNELS_DIR}"/*.toml 2>/dev/null | wc -l | tr -d ' '
+  local n
+  n="$(ls -1 "${TUNNELS_DIR}"/*.toml 2>/dev/null | wc -l | tr -d ' ')"
+  echo "$n"
 }
 
-core_status_line(){
-  if core_installed; then
-    echo "Core: installed (detected: ${cv:-unknown})"
+health_timer_status(){
+  if systemctl is-enabled --quiet backhaul-manager-health.timer 2>/dev/null; then
+    echo "enabled"
   else
-    echo "Core: NOT installed"
+    echo "disabled"
   fi
 }
 
+about_screen(){
+  ui_textarea "$MANAGER_NAME" \
+"Backhaul Manager
+
+Repo: ${MANAGER_REPO_URL}
+
+Core repo: https://github.com/${CORE_REPO}
+
+Core runtime version output:
+$(core_version_runtime)
+
+Core tag tracking (local):
+$(core_version_local)
+
+Tunnels directory:
+${TUNNELS_DIR}
+
+Health-check timer:
+$(health_timer_status)
+
+Cron file:
+${CRON_FILE}"
+}
+
 ########################################
-# CLI flags (cron/health)
+# CLI flags (cron / timer)
 ########################################
 handle_cli(){
   case "${1:-}" in
@@ -1292,33 +1483,58 @@ handle_cli(){
 }
 
 ########################################
-# Main menu
+# Menu
 ########################################
 main_menu(){
   while true; do
-    local cv hdr sel
-    cv="$(core_version_tag_guess)"
-    hdr="Core: $([[ -n "$cv" ]] && echo "$cv" || echo "not-installed") | Tunnels: $(tunnels_count)\n\nSelect an option:"
+    local core_tag core_run
+    core_tag="$(core_version_local)"
+    core_run="$(core_version_runtime)"
+
+    local hdr
+    hdr="Repo: ${MANAGER_REPO_URL}\nCore tag: ${core_tag}\nTunnels: $(tunnels_count)\nHealth timer: $(health_timer_status)\n\nChoose an option:"
+
+    local sel
     sel="$(ui_menu "$MANAGER_NAME" "$hdr" \
-      "1" "Setup (install manager + install/update core)" \
-      "2" "Install/Update Core (check latest release)" \
+      "1" "Install/Setup Manager + Install/Update Core" \
+      "2" "Core install/update (check latest and update if needed)" \
       "3" "Create new tunnel" \
       "4" "Manage tunnels" \
       "5" "Restart ALL tunnels" \
-      "6" "Health-check (systemd timer) settings" \
+      "6" "Health-check timer (systemd) settings" \
       "7" "Cron periodic restart settings" \
-      "8" "Uninstall (remove everything)" \
-      "0" "Exit")" || exit 0
+      "8" "About" \
+      "9" "Uninstall (remove everything)" \
+      "0" "Exit" \
+    )" || exit 0
 
     case "$sel" in
-      1) setup_all ;;
+      1) install_everything ;;
       2) install_or_update_core ;;
       3) create_tunnel ;;
-      4) manage_tunnels_menu ;;
+      4) manage_tunnel_menu ;;
       5) restart_all_tunnels ;;
-      6) configure_health_timer ;;
+      6)
+        local hsel
+        hsel="$(ui_menu "$MANAGER_NAME" "Health-check timer settings:" \
+          "1" "Enable health-check timer (every ~2 minutes)" \
+          "2" "Disable health-check timer" \
+          "3" "Show timer status" \
+          "0" "Back" \
+        )" || true
+        case "$hsel" in
+          1) enable_health_timer ;;
+          2) disable_health_timer ;;
+          3)
+            systemctl status backhaul-manager-health.timer --no-pager | sed 's/\x1b\[[0-9;]*m//g' > /tmp/bhm_timer_status.txt || true
+            ui_textarea "$MANAGER_NAME" "$(cat /tmp/bhm_timer_status.txt 2>/dev/null || echo "No output.")"
+            ;;
+          0) ;;
+        esac
+        ;;
       7) setup_periodic_restart_cron ;;
-      8) uninstall_all ;;
+      8) about_screen ;;
+      9) uninstall_all ;;
       0) exit 0 ;;
       *) ;;
     esac
@@ -1333,12 +1549,14 @@ ensure_prereqs
 init_ui
 install_system_layout
 install_systemd_template
+install_manager_self
+install_health_units
 handle_cli "$@"
 
-# If command not installed yet, offer setup
-if ! manager_installed; then
-  if ui_yesno "$MANAGER_NAME" "Manager command is not installed.\n\nRun initial setup now?"; then
-    setup_all
+# First-run suggestion
+if ! core_installed; then
+  if ui_yesno "$MANAGER_NAME" "Core is not installed.\nRun setup now (install/update core + manager)?"; then
+    install_everything
   fi
 fi
 
