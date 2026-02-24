@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.8)
+# Backhaul Manager (v1.0.9)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.8"
+MANAGER_VERSION="v1.0.9"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -297,20 +297,36 @@ port_in_use() {
 }
 
 tunnel_bind_port_taken() {
+  # Returns 0 if a SERVER tunnel already uses bind port $1 (excluding optional tunnel name $2)
   local p="$1"
+  local ignore_name="${2:-}"
   [[ -s "$DB_FILE" ]] || return 1
 
   local db_name db_role db_trans db_conf db_svc
   while IFS='|' read -r db_name db_role db_trans db_conf db_svc; do
     [[ -z "${db_name:-}" ]] && continue
+    [[ -n "${ignore_name}" && "${db_name}" == "${ignore_name}" ]] && continue
     [[ "${db_role}" != "server" ]] && continue
     [[ -f "${db_conf}" ]] || continue
 
+    # Config uses bind_addr = "IP:PORT" (not bind_port). Support both for backwards compat.
     local oldp=""
     oldp="$(awk -F'=' '
+      /^[[:space:]]*bind_addr[[:space:]]*=/ {
+        v=$2;
+        gsub(/^[[:space:]]*"/,"",v);
+        gsub(/"[[:space:]]*$/,"",v);
+        # extract port after last ":" (works for IPv4:port, 0.0.0.0:3080, and [IPv6]:port)
+        sub(/.*:/,"",v);
+        gsub(/[[:space:]]/,"",v);
+        print v;
+        exit
+      }
       /^[[:space:]]*bind_port[[:space:]]*=/ {
-        gsub(/[[:space:]]/,"",$2);
-        print $2;
+        v=$2;
+        gsub(/[[:space:]]/,"",v);
+        gsub(/"/,"",v);
+        print v;
         exit
       }' "${db_conf}" 2>/dev/null || true)"
 
@@ -319,6 +335,7 @@ tunnel_bind_port_taken() {
 
   return 1
 }
+
 
 # ---------- DB ----------
 db_has_tunnel() { awk -F'|' -v n="$1" '$1==n{found=1} END{exit !found}' "${DB_FILE}"; }
@@ -661,7 +678,7 @@ ensure_tls_for_tunnel() {
       ensure_certbot
       if ! certbot certonly --standalone \
         -d "${domain}" \
-        --non-interactive --agree-tos -m "${email}"; then
+        --non-interactive --agree-tos -m "${email}" > /dev/tty 2>&1; then
         tty_out "${RED}ERROR:${NC} certbot failed. Check DNS (A/AAAA record) and inbound port 80 reachability."
         continue
       fi
@@ -704,7 +721,7 @@ EOF
         -keyout "${key_out}" \
         -out "${cert_out}" \
         -days "${days}" \
-        -subj "/CN=${cn}"; then
+        -subj "/CN=${cn}" > /dev/tty 2>&1; then
         tty_out "${RED}ERROR:${NC} openssl self-signed generation failed."
         continue
       fi
