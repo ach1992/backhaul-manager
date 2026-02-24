@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.12)
+# Backhaul Manager (v1.0.13)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.11"
+MANAGER_VERSION="v1.0.13"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -1467,10 +1467,27 @@ EOF
 
 disable_scheduling() {
   rm -f /etc/cron.d/backhaul-manager 2>/dev/null || true
-  systemctl disable --now "$(timer_unit_name restart-all)" >/dev/null 2>&1 || true
-  systemctl disable --now "$(timer_unit_name health-check)" >/dev/null 2>&1 || true
+
+  # Stop & disable timers/services (ignore errors if not installed)
+  for u in "$(timer_unit_name restart-all)" "$(timer_unit_name health-check)"; do
+    systemctl stop "$u" >/dev/null 2>&1 || true
+    systemctl disable "$u" >/dev/null 2>&1 || true
+    systemctl reset-failed "$u" >/dev/null 2>&1 || true
+  done
+  for s in "$(timer_svc_name restart-all)" "$(timer_svc_name health-check)"; do
+    systemctl stop "$s" >/dev/null 2>&1 || true
+    systemctl disable "$s" >/dev/null 2>&1 || true
+    systemctl reset-failed "$s" >/dev/null 2>&1 || true
+  done
+
+  # Remove unit files
   rm -f "${SYSTEMD_DIR}/$(timer_svc_name restart-all)" "${SYSTEMD_DIR}/$(timer_unit_name restart-all)" \
         "${SYSTEMD_DIR}/$(timer_svc_name health-check)" "${SYSTEMD_DIR}/$(timer_unit_name health-check)" 2>/dev/null || true
+
+  # Remove wants symlinks if they linger
+  rm -f "${SYSTEMD_DIR}/timers.target.wants/$(timer_unit_name restart-all)" \
+        "${SYSTEMD_DIR}/timers.target.wants/$(timer_unit_name health-check)" 2>/dev/null || true
+
   systemctl daemon-reload
 }
 
