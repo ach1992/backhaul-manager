@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.0)
+# Backhaul Manager (v0.0.1)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.0"
+MANAGER_VERSION="v0.0.1"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -1317,47 +1317,32 @@ show_scheduling_status() {
   tty_out "${BOLD}Scheduling Status${NC}"
   tty_out ""
 
-  # ---- cron ----
+  # ---- Cron ----
   if [[ -f /etc/cron.d/backhaul-manager ]]; then
-    tty_out "${BOLD}Cron:${NC} ${GREEN}enabled${NC}  ${GRAY}(/etc/cron.d/backhaul-manager)${NC}"
+    tty_out "${BOLD}Cron:${NC} ${GREEN}enabled${NC} ${GRAY}(/etc/cron.d/backhaul-manager)${NC}"
     sed 's/^/  /' /etc/cron.d/backhaul-manager > /dev/tty || true
   else
-    tty_out "${BOLD}Cron:${NC} ${YELLOW}(none)${NC}"
+    tty_out "${BOLD}Cron:${NC} ${GRAY}(none)${NC}"
   fi
 
   tty_out ""
   tty_out "${BOLD}Systemd timers:${NC}"
-																															 
-																																		
-	  
-					  
-	
 
-  local timers=()
-  timers+=("$(timer_unit_name restart-all)")
-  timers+=("$(timer_unit_name health-check)")
+  # Table header
+  tty_out "  ${GRAY}NAME${NC}                         ${GRAY}ENABLED${NC}   ${GRAY}ACTIVE${NC}    ${GRAY}NEXT${NC}                        ${GRAY}LAST${NC}"
+  tty_out "  --------------------------------------------------------------------------------------------------------------"
 
   local any=0
-  for u in "${timers[@]}"; do
+  local units=(
+    "$(timer_unit_name health-check)"
+    "$(timer_unit_name restart-all)"
+  )
+
+  for u in "${units[@]}"; do
     if systemctl status "${u}" --no-pager >/dev/null 2>&1; then
       any=1
-      break
-    fi
-  done
-
-  if [[ "${any}" -eq 0 ]]; then
-    tty_out "  ${YELLOW}(none)${NC}"
-  else
-    tty_out "  ${BOLD}NAME${NC}                           ${BOLD}ENABLED${NC}    ${BOLD}ACTIVE${NC}     ${BOLD}NEXT${NC}                        ${BOLD}LAST${NC}"
-    tty_out "  -------------------------------------------------------------------------------"
-    for u in "${timers[@]}"; do
-      if ! systemctl status "${u}" --no-pager >/dev/null 2>&1; then
-        tty_out "  ${u}  ${YELLOW}not-installed${NC}"
-        continue
-      fi
-
-      local st act next last stc actc
-      st="$(systemctl is-enabled "${u}" 2>/dev/null || true)"
+      local en act next last
+      en="$(systemctl is-enabled "${u}" 2>/dev/null || true)"
       act="$(systemctl is-active "${u}" 2>/dev/null || true)"
       next="$(systemctl show "${u}" -p NextElapseUSecRealtime --value 2>/dev/null || true)"
       last="$(systemctl show "${u}" -p LastTriggerUSec --value 2>/dev/null || true)"
@@ -1365,20 +1350,40 @@ show_scheduling_status() {
       [[ -z "${next}" ]] && next="n/a"
       [[ -z "${last}" ]] && last="n/a"
 
-      stc="$(badge_enabled "${st}")"
-      actc="$(badge_active "${act}")"
+      # enabled color
+      local en_c="${GRAY}${en}${NC}"
+      if [[ "${en}" == "enabled" ]]; then en_c="${GREEN}${en}${NC}"
+      elif [[ "${en}" == "disabled" ]]; then en_c="${RED}${en}${NC}"
+      fi
 
-      # Keep columns readable even with ANSI colors (values are short).
-      printf "  %-30s  %-10b  %-10b  %-26s  %-26s
-"         "${u}" "${stc}" "${actc}" "${next}" "${last}" > /dev/tty
-    done
+      # active color
+      local act_c="${GRAY}${act}${NC}"
+      case "${act}" in
+        active) act_c="${GREEN}${act}${NC}" ;;
+        inactive|elapsed) act_c="${YELLOW}${act}${NC}" ;;
+        failed) act_c="${RED}${act}${NC}" ;;
+      esac
+
+      # next/last color
+      local next_c="${next}"
+      local last_c="${last}"
+      [[ "${next}" == "n/a" ]] && next_c="${GRAY}${next}${NC}"
+      [[ "${last}" == "n/a" ]] && last_c="${GRAY}${last}${NC}"
+
+      tty_out "  $(printf '%-28s %-9b %-9b %-27b %-27b' "${u}" "${en_c}" "${act_c}" "${next_c}" "${last_c}")"
+    fi
+  done
+
+  if (( any == 0 )); then
+    tty_out "  ${GRAY}(none)${NC}"
   fi
 
   tty_out ""
-  tty_out "${GRAY}Tip:${NC} if NEXT shows ${BOLD}n/a${NC}, the timer has no upcoming trigger (bad schedule or missing OnCalendar/OnUnit*). Recreate it from the Scheduling menu."
+  tty_out "${GRAY}Note:${NC} If NEXT/LEFT shows n/a, it usually means the timer has no upcoming trigger (misparsed schedule or only ran OnBootSec once). Recreate the timer from the Scheduling menu to regenerate unit files."
   tty_out ""
   pause
 }
+
 
 create_schedule() {
   local kind="$1" minutes="$2"
