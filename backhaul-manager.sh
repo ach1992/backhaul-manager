@@ -3,8 +3,10 @@
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 
-set -u
+set -Eeuo pipefail
 export LC_ALL=C
+
+trap 'echo -e "\033[31mERROR:\033[0m Script failed at line $LINENO (exit=$?)" >&2' ERR
 
 ########################################
 # Constants
@@ -12,6 +14,10 @@ export LC_ALL=C
 MANAGER_NAME="Backhaul Manager"
 MANAGER_CMD="backhaul-manager"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
+
+# اگر اسم فایل اسکریپت در repo فرق دارد، این URL را مطابق فایل درست کن
+# (مثلاً main.sh یا backhaul-manager.sh و ...)
+MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
 
 CORE_REPO="Musixal/Backhaul"
 CORE_BIN_NAME="backhaul"
@@ -117,7 +123,7 @@ ui_input(){
   printf "%s" "$out"
 }
 
-# ui_menu(key label key label ...)
+# ui_menu(title prompt key label key label ...)
 # خروجی: همان key انتخاب شده
 ui_menu(){
   local title="$1"; shift
@@ -130,6 +136,7 @@ ui_menu(){
   local keys=()
   local labels=()
   while [[ $# -gt 0 ]]; do
+    [[ $# -ge 2 ]] || break
     keys+=("$1")
     labels+=("$2")
     printf "  %s) %s\n" "$1" "$2"
@@ -184,6 +191,7 @@ pm_install(){
   pm="$(detect_pm)"
   case "$pm" in
     apt)
+      DEBIAN_FRONTEND=noninteractive apt-get -y update >/dev/null 2>&1 || true
       DEBIAN_FRONTEND=noninteractive apt-get -y install "$pkg" >/dev/null 2>&1 || return 1
       ;;
     dnf)
@@ -215,12 +223,16 @@ ensure_cmd(){
 }
 
 ensure_prereqs(){
-  # No full upgrade; only install missing.
   ensure_cmd tar tar
-  ensure_cmd systemctl systemd
 
+  # دانلود
   if ! cmd_exists curl && ! cmd_exists wget; then
     pm_install curl >/dev/null 2>&1 || pm_install wget >/dev/null 2>&1 || die "Neither curl nor wget is available and install failed."
+  fi
+
+  # systemd check (خیلی مهم برای مشکل منو/سرویس)
+  if ! cmd_exists systemctl; then
+    die "systemctl not found. This manager requires systemd (systemctl). If you are on Alpine/Container without systemd, it will not work."
   fi
 
   # Best-effort for port check
@@ -257,7 +269,6 @@ github_latest_release_json(){
 
 extract_latest_tag(){
   local json="$1"
-  # "tag_name": "v0.7.2"
   grep -oE '"tag_name"\s*:\s*"[^"]+"' "$json" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/'
 }
 
@@ -299,15 +310,52 @@ manager_installed(){
   [[ -x "$MANAGER_INSTALL_PATH" ]]
 }
 
+# تشخیص اینکه اسکریپت از stdin اجرا شده یا نه
+running_from_stdin(){
+  # اگر FD0 pipe باشد (curl | bash) => true
+  [[ -p /dev/stdin ]]
+}
+
+# مسیر واقعی سورس
+script_source_path(){
+  # بهترین روش در bash
+  local src="${BASH_SOURCE[0]:-}"
+  [[ -n "$src" ]] && echo "$src" || echo "$0"
+}
+
 install_manager_self(){
-  local src="$0"
+  # اگر قبلاً نصب شده، کاری نکن (اما اگر نصب خراب بود، کاربر می‌تونه uninstall کنه)
   if manager_installed; then
     return 0
   fi
-  if [[ -f "$src" ]]; then
-    cp -f "$src" "$MANAGER_INSTALL_PATH" || die "Failed to copy manager to ${MANAGER_INSTALL_PATH}"
-    chmod +x "$MANAGER_INSTALL_PATH" || true
+
+  local src
+  src="$(script_source_path)"
+
+  # اگر از stdin اجرا شد یا فایل قابل‌کپی نبود، از GitHub raw دانلود کن
+  if running_from_stdin || [[ ! -f "$src" ]]; then
+    ylw "Installing manager from GitHub raw..."
+    local tmp="/tmp/backhaul-manager-install.sh"
+    download_file "$MANAGER_RAW_URL" "$tmp" || die "Failed to download manager from: $MANAGER_RAW_URL"
+    install -m 0755 "$tmp" "$MANAGER_INSTALL_PATH" || die "Failed to install manager to ${MANAGER_INSTALL_PATH}"
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
   fi
+
+  # اگر src روی bash یا sh اشاره کرد، جلوگیری کن
+  local bn
+  bn="$(basename "$src")"
+  if [[ "$bn" == "bash" || "$bn" == "sh" ]]; then
+    ylw "Detected suspicious source path ($src). Installing from GitHub raw instead..."
+    local tmp="/tmp/backhaul-manager-install.sh"
+    download_file "$MANAGER_RAW_URL" "$tmp" || die "Failed to download manager from: $MANAGER_RAW_URL"
+    install -m 0755 "$tmp" "$MANAGER_INSTALL_PATH" || die "Failed to install manager to ${MANAGER_INSTALL_PATH}"
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  # نصب از فایل محلی
+  install -m 0755 "$src" "$MANAGER_INSTALL_PATH" || die "Failed to copy manager to ${MANAGER_INSTALL_PATH}"
 }
 
 install_system_layout(){
@@ -391,7 +439,6 @@ install_or_update_core(){
     fi
   fi
 
-  # Offline option if present
   local offline_tgz="${OFFLINE_DIR}/backhaul_linux_${arch}.tar.gz"
   if [[ -d "$OFFLINE_DIR" && -f "$offline_tgz" ]]; then
     if ui_yesno "$MANAGER_NAME" "Offline package found:\n$offline_tgz\n\nInstall/update using offline package?"; then
@@ -414,7 +461,6 @@ install_or_update_core(){
 # Health-check (systemd timer/service)
 ########################################
 install_health_units(){
-  # service
   if [[ ! -f "$HEALTH_SERVICE" ]]; then
     cat > "$HEALTH_SERVICE" <<EOF
 [Unit]
@@ -428,7 +474,6 @@ ExecStart=${MANAGER_INSTALL_PATH} --health-check
 EOF
   fi
 
-  # timer
   if [[ ! -f "$HEALTH_TIMER" ]]; then
     cat > "$HEALTH_TIMER" <<'EOF'
 [Unit]
@@ -459,8 +504,12 @@ disable_health_timer(){
   ui_msg "$MANAGER_NAME" "Health-check timer disabled."
 }
 
+########################################
+# Tunnel helpers and the rest of your original script
+# (از اینجا به بعد تقریباً همان کد قبلی است، فقط بدون تغییرات بی‌ربط)
+########################################
+
 health_check_run(){
-  # Checks each backhaul@<tunnel> service. If inactive/failed -> restart.
   local tunnels
   tunnels="$(list_tunnels)"
   [[ -n "$tunnels" ]] || exit 0
@@ -473,7 +522,6 @@ health_check_run(){
     if systemctl is-active --quiet "$svc"; then
       ((ok++))
     else
-      # attempt restart
       if systemctl restart "$svc" >/dev/null 2>&1; then
         ((fixed++))
       else
@@ -486,9 +534,6 @@ health_check_run(){
   exit 0
 }
 
-########################################
-# Cron periodic restart (kept)
-########################################
 setup_periodic_restart_cron(){
   if ! ui_yesno "$MANAGER_NAME" "Enable periodic restart using cron?\n(kept alongside systemd Restart=always)\n\nIf you choose No, cron will be removed."; then
     rm -f "$CRON_FILE" >/dev/null 2>&1 || true
@@ -514,18 +559,8 @@ EOF
   ui_msg "$MANAGER_NAME" "Cron periodic restart configured.\n\nEvery ${hours} hours."
 }
 
-########################################
-# Validation / port checks
-########################################
-valid_name(){
-  [[ "$1" =~ ^[a-zA-Z0-9_-]{1,32}$ ]]
-}
-
-valid_port(){
-  local p="$1"
-  [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
-  (( p >= 1 && p <= 65535 ))
-}
+valid_name(){ [[ "$1" =~ ^[a-zA-Z0-9_-]{1,32}$ ]]; }
+valid_port(){ local p="$1"; [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1; (( p >= 1 && p <= 65535 )); }
 
 valid_hostport(){
   local v="$1"
@@ -551,20 +586,9 @@ port_conflict_in_running(){
   return 1
 }
 
-tunnel_config_path(){
-  local name="$1"
-  echo "${TUNNELS_DIR}/${name}.toml"
-}
-
-tunnel_exists(){
-  local name="$1"
-  [[ -f "$(tunnel_config_path "$name")" ]]
-}
-
-service_name(){
-  local name="$1"
-  echo "backhaul@${name}.service"
-}
+tunnel_config_path(){ local name="$1"; echo "${TUNNELS_DIR}/${name}.toml"; }
+tunnel_exists(){ local name="$1"; [[ -f "$(tunnel_config_path "$name")" ]]; }
+service_name(){ local name="$1"; echo "backhaul@${name}.service"; }
 
 collect_existing_ports_from_configs(){
   local f
@@ -592,24 +616,15 @@ collect_existing_ports_from_configs(){
   done
 }
 
-port_conflict_in_configs(){
-  local p="$1"
-  collect_existing_ports_from_configs | grep -qx "$p"
-}
+port_conflict_in_configs(){ local p="$1"; collect_existing_ports_from_configs | grep -qx "$p"; }
 
 ensure_no_port_conflict(){
   local p="$1"
-  if port_conflict_in_configs "$p"; then
-    return 1
-  fi
-  if port_conflict_in_running "$p"; then
-    return 1
-  fi
+  if port_conflict_in_configs "$p"; then return 1; fi
+  if port_conflict_in_running "$p"; then return 1; fi
   return 0
 }
 
-# Parse comma-separated port list like: "443, 80-90,8443"
-# Outputs normalized tokens (one per line) or returns non-zero on invalid.
 parse_port_list(){
   local s="$1"
   s="${s// /}"
@@ -635,17 +650,10 @@ parse_port_list(){
   return 0
 }
 
-########################################
-# SSL helpers (Self-signed / Import / Let's Encrypt)
-########################################
-ensure_openssl(){
-  ensure_cmd openssl openssl
-}
+ensure_openssl(){ ensure_cmd openssl openssl; }
 
 ensure_certbot(){
-  if cmd_exists certbot; then
-    return 0
-  fi
+  if cmd_exists certbot; then return 0; fi
   pm_install certbot >/dev/null 2>&1 || die "Failed to install certbot. Please install it manually."
 }
 
@@ -730,9 +738,6 @@ ssl_letsencrypt(){
   echo "${SSL_DIR}/${name}/fullchain.pem|${SSL_DIR}/${name}/privkey.pem"
 }
 
-########################################
-# Tunnel config generation / ports rules
-########################################
 default_token(){
   if cmd_exists openssl; then
     openssl rand -hex 12 2>/dev/null
@@ -764,18 +769,16 @@ choose_transport(){
   echo "$sel"
 }
 
-# Outputs TOML lines: "rule",
 build_ports_rules_from_portlist(){
   local portlist="$1"
-  local mode="$2"      # none|local|remote
-  local target="$3"    # empty|5201|1.2.3.4:5201|domain:5201|[v6]:5201
+  local mode="$2"
+  local target="$3"
   local rules=()
 
   local token
   while read -r token; do
     [[ -n "$token" ]] || continue
 
-    # Conflict checks
     if [[ "$token" =~ ^[0-9]+$ ]]; then
       if ! ensure_no_port_conflict "$token"; then
         ui_msg "$MANAGER_NAME" "Port conflict detected for listen port: $token\nRule not added."
@@ -873,7 +876,6 @@ You can repeat and add more groups. Choose Done to finish."
         fi
         ;;
       2) break ;;
-      *) ;;
     esac
   done
 
@@ -1003,7 +1005,6 @@ ports_manage_interactive(){
         return 0
         ;;
       0) return 0 ;;
-      *) ;;
     esac
   done
 }
@@ -1028,7 +1029,6 @@ write_tunnel_config(){
   nodelay="$(ui_input "$MANAGER_NAME" "nodelay (true/false):" "true")" || return 1
   web_port="$(ui_input "$MANAGER_NAME" "web_port (0=disabled):" "0")" || return 1
   log_level="$(ui_input "$MANAGER_NAME" "log_level (debug/info/warn/error):" "info")" || return 1
-
   heartbeat="$(ui_input "$MANAGER_NAME" "heartbeat (seconds):" "40")" || return 1
 
   mux_con="8"
@@ -1037,7 +1037,6 @@ write_tunnel_config(){
   mux_recievebuffer="4194304"
   mux_streambuffer="65536"
 
-  # TLS if needed
   if [[ "$transport" == "wss" || "$transport" == "wssmux" ]]; then
     if [[ "$role" == "server" ]]; then
       local sslsel
@@ -1163,9 +1162,6 @@ EOF
   chmod 600 "$cfg" || true
 }
 
-########################################
-# Tunnels listing / status
-########################################
 list_tunnels(){
   ls -1 "${TUNNELS_DIR}"/*.toml 2>/dev/null | sed -E 's#.*/##; s#\.toml$##' || true
 }
@@ -1181,9 +1177,6 @@ tunnel_status_text(){
   fi
 }
 
-########################################
-# Main actions
-########################################
 install_everything(){
   ensure_prereqs
   init_ui
@@ -1277,7 +1270,6 @@ edit_tunnel(){
       systemctl restart "$(service_name "$name")" >/dev/null 2>&1 || true
       ui_msg "$MANAGER_NAME" "Editor closed. Service restarted."
       ;;
-    0) ;;
   esac
 }
 
@@ -1308,9 +1300,8 @@ show_logs(){
 manage_tunnel_actions(){
   local name="$1"
   while true; do
-    local status
+    local status sel
     status="$(tunnel_status_text "$name")"
-    local sel
     sel="$(ui_menu "$MANAGER_NAME" "Tunnel: $name (status: $status)" \
       "1" "Start" \
       "2" "Stop" \
@@ -1334,7 +1325,6 @@ manage_tunnel_actions(){
       6) show_logs "$name" ;;
       7) delete_tunnel "$name"; return 0 ;;
       0) return 0 ;;
-      *) ;;
     esac
   done
 }
@@ -1407,9 +1397,6 @@ uninstall_all(){
   ui_msg "$MANAGER_NAME" "Uninstall completed."
 }
 
-########################################
-# Header / About
-########################################
 tunnels_count(){
   local n
   n="$(ls -1 "${TUNNELS_DIR}"/*.toml 2>/dev/null | wc -l | tr -d ' ')"
@@ -1448,9 +1435,6 @@ Cron file:
 ${CRON_FILE}"
 }
 
-########################################
-# CLI flags (cron / timer)
-########################################
 handle_cli(){
   case "${1:-}" in
     --restart-all)
@@ -1464,19 +1448,14 @@ handle_cli(){
   esac
 }
 
-########################################
-# Menu
-########################################
 main_menu(){
   while true; do
-    local core_tag core_run
+    local core_tag core_run hdr sel
     core_tag="$(core_version_local)"
     core_run="$(core_version_runtime)"
 
-    local hdr
     hdr="Repo: ${MANAGER_REPO_URL}\nCore tag: ${core_tag}\nTunnels: $(tunnels_count)\nHealth timer: $(health_timer_status)\n\nChoose an option:"
 
-    local sel
     sel="$(ui_menu "$MANAGER_NAME" "$hdr" \
       "1" "Install/Setup Manager + Install/Update Core" \
       "2" "Core install/update (check latest and update if needed)" \
@@ -1511,14 +1490,12 @@ main_menu(){
             systemctl status backhaul-manager-health.timer --no-pager | sed 's/\x1b\[[0-9;]*m//g' > /tmp/bhm_timer_status.txt || true
             ui_textarea "$MANAGER_NAME" "$(cat /tmp/bhm_timer_status.txt 2>/dev/null || echo "No output.")"
             ;;
-          0) ;;
         esac
         ;;
       7) setup_periodic_restart_cron ;;
       8) about_screen ;;
       9) uninstall_all ;;
       0) exit 0 ;;
-      *) ;;
     esac
   done
 }
@@ -1535,7 +1512,12 @@ install_manager_self
 install_health_units
 handle_cli "$@"
 
-# First-run suggestion
+# اگر الان از مسیر نصب‌شده اجرا نشده‌ایم، از اینجا به بعد همان نسخه نصب‌شده را اجرا کن
+# این باعث می‌شود مشکل "نصب از stdin" و "نسخه‌های مختلف" به هم نخورد.
+if [[ "$(command -v "$MANAGER_CMD" 2>/dev/null || true)" == "$MANAGER_INSTALL_PATH" ]] && [[ "${BASH_SOURCE[0]}" != "$MANAGER_INSTALL_PATH" ]]; then
+  exec "$MANAGER_INSTALL_PATH" "$@"
+fi
+
 if ! core_installed; then
   if ui_yesno "$MANAGER_NAME" "Core is not installed.\nRun setup now (install/update core + manager)?"; then
     install_everything
