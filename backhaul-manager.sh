@@ -328,7 +328,10 @@ download_core_online() {
   local asset="$1" tag="$2"
   local url="${CORE_RELEASES_URL}/download/${tag}/${asset}"
   local tmp="/tmp/${asset}"
-  echo -e "${BLUE}Downloading core:${NC} ${url}"
+
+  # Print progress to stderr so stdout stays clean (ONLY the path)
+  echo -e "${BLUE}Downloading core:${NC} ${url}" >&2
+
   curl -fL --retry 3 --retry-delay 2 -o "${tmp}" "${url}" || die "Failed to download core asset."
   echo "${tmp}"
 }
