@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Backhaul Manager - single-file installer + menu (TEXT ONLY - no whiptail)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 
