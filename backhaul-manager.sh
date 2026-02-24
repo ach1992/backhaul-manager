@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.6)
+# Backhaul Manager (v1.0.5)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.6"
+MANAGER_VERSION="v1.0.5"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -22,6 +22,7 @@ CORE_BIN="/usr/local/bin/backhaul"
 
 CONF_DIR="/etc/backhaul-manager"
 TUNNELS_DIR="${CONF_DIR}/tunnels"
+TLS_BASE_DIR="${TUNNELS_DIR}/.tls"
 STATE_DIR="/var/lib/backhaul-manager"
 DB_FILE="${STATE_DIR}/tunnels.db"
 
@@ -105,10 +106,11 @@ ensure_deps() {
 }
 
 ensure_dirs() {
-  mkdir -p "${APP_DIR}" "${CONF_DIR}" "${TUNNELS_DIR}" "${STATE_DIR}" "${LOG_DIR}"
+  mkdir -p "${APP_DIR}" "${CONF_DIR}" "${TUNNELS_DIR}" "${TLS_BASE_DIR}" "${STATE_DIR}" "${LOG_DIR}"
   touch "${DB_FILE}"
   chmod 700 "${APP_DIR}" "${STATE_DIR}" || true
   chmod 755 "${CONF_DIR}" "${TUNNELS_DIR}" || true
+  chmod 700 "${TLS_BASE_DIR}" || true
 }
 
 realpath_soft() {
@@ -287,6 +289,28 @@ port_in_use() {
   ss -lnup  2>/dev/null | awk '{print $4}' | grep -E "[:.]${port}\$" -q && return 0
   return 1
 }
+
+tunnel_bind_port_taken() {
+  # Checks existing server tunnel configs for duplicate bind_port.
+  # Args: port, exclude_name(optional)
+  local p="$1"
+  local exclude="${2:-}"
+  [[ -s "${DB_FILE}" ]] || return 1
+
+  while IFS='|' read -r name role trans conf svc; do
+    [[ -z "${name:-}" ]] && continue
+    [[ -n "${exclude}" && "${name}" == "${exclude}" ]] && continue
+    [[ "${role}" != "server" ]] && continue
+    [[ -f "${conf}" ]] || continue
+
+    local oldp=""
+    oldp="$(awk -F'=' '/^[[:space:]]*bind_port[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2; exit}' "${conf}" 2>/dev/null || true)"
+    [[ -n "${oldp}" && "${oldp}" == "${p}" ]] && return 0
+  done < "${DB_FILE}"
+
+  return 1
+}
+
 
 
 # ---------- DB ----------
@@ -552,29 +576,109 @@ check_port_80_hint() {
   fi
 }
 
+
+ensure_certbot() {
+  have_cmd certbot && return 0
+  tty_out "Installing certbot..."
+  pkg_install certbot
+}
+
+ensure_openssl() {
+  have_cmd openssl && return 0
+  tty_out "Installing openssl..."
+  pkg_install openssl
+}
+
+ensure_tls_for_tunnel() {
+  # Creates/obtains TLS cert+key for a tunnel and stores them alongside tunnel config.
+  # Supports:
+  #  - Let's Encrypt (standalone, port 80 must be free)
+  #  - Self-signed
+  local tname="$1"
+
+  mkdir -p "${TLS_BASE_DIR}/${tname}"
+  chmod 700 "${TLS_BASE_DIR}/${tname}" || true
+
+  local cert_out="${TLS_BASE_DIR}/${tname}/fullchain.pem"
+  local key_out="${TLS_BASE_DIR}/${tname}/privkey.pem"
+  local meta_out="${TLS_BASE_DIR}/${tname}/tls.meta"
+
+  if [[ -f "${cert_out}" && -f "${key_out}" ]]; then
+    if ask_yes_no "TLS files already exist for '${tname}'. Reuse them?" "y"; then
+      echo "${cert_out}|${key_out}"
+      return 0
+    fi
+    rm -f "${cert_out}" "${key_out}" "${meta_out}" || true
+  fi
+
+  tty_out ""
+  tty_out "${BOLD}TLS required for this transport.${NC}"
+  tty_out "1) Let's Encrypt (standalone, uses port 80)"
+  tty_out "2) Self-signed"
+  local method
+  tty_readline method "Select TLS method (1-2) [default: 1]: "
+  method="${method:-1}"
+
+  if [[ "${method}" == "1" ]]; then
+    local domain email
+    tty_readline domain "Domain (FQDN) for Let's Encrypt: "
+    [[ -n "${domain}" ]] || die "Domain is required for Let's Encrypt."
+    tty_readline email "Email [default: admin@${domain}]: "
+    email="${email:-admin@${domain}}"
+
+    port_in_use 80 && die "Port 80 is in use. Free port 80 for Let's Encrypt, or use Self-signed."
+    ensure_certbot
+
+    certbot certonly --standalone \
+      -d "${domain}" \
+      --non-interactive --agree-tos -m "${email}" || die "certbot failed"
+
+    cp -f "/etc/letsencrypt/live/${domain}/fullchain.pem" "${cert_out}"
+    cp -f "/etc/letsencrypt/live/${domain}/privkey.pem" "${key_out}"
+    chmod 600 "${key_out}" || true
+    cat > "${meta_out}" <<EOF
+method=letsencrypt
+domain=${domain}
+email=${email}
+EOF
+  else
+    local cn days
+    tty_readline cn "Certificate CN (domain or ip) [default: localhost]: "
+    cn="${cn:-localhost}"
+    tty_readline days "Validity days [default: 3650]: "
+    days="${days:-3650}"
+
+    ensure_openssl
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "${key_out}" \
+      -out "${cert_out}" \
+      -days "${days}" \
+      -subj "/CN=${cn}" || die "openssl self-signed failed"
+
+    chmod 600 "${key_out}" || true
+    cat > "${meta_out}" <<EOF
+method=selfsigned
+cn=${cn}
+days=${days}
+EOF
+  fi
+
+  [[ -f "${cert_out}" && -f "${key_out}" ]] || die "TLS generation failed."
+  echo "${cert_out}|${key_out}"
+}
+
+
 input_tls_if_needed() {
-  local transport="$1" role="${2:-server}"
+  # Args: transport, role, tunnel_name
+  local transport="$1" role="${2:-server}" tname="${3:-}"
   if [[ "${role}" != "server" ]]; then
     echo ""
     return 0
   fi
   if [[ "${transport}" == "wss" || "${transport}" == "wssmux" ]]; then
-    tty_out ""
-    tty_out "${BOLD}TLS configuration required for:${NC} ${transport}"
+    [[ -n "${tname}" ]] || die "Internal error: tunnel name missing for TLS."
     check_port_80_hint
-    tty_out "Provide paths to existing TLS certificate and key files."
-    local cert key
-    while true; do
-      cert="$(input_nonempty "TLS certificate path" "/etc/letsencrypt/live/yourdomain/fullchain.pem")"
-      [[ -f "${cert}" ]] || { tty_out "File not found: ${cert}"; continue; }
-      break
-    done
-    while true; do
-      key="$(input_nonempty "TLS private key path" "/etc/letsencrypt/live/yourdomain/privkey.pem")"
-      [[ -f "${key}" ]] || { tty_out "File not found: ${key}"; continue; }
-      break
-    done
-    echo "${cert}|${key}"
+    ensure_tls_for_tunnel "${tname}"
   else
     echo ""
   fi
@@ -768,21 +872,27 @@ create_tunnel() {
   local tunnel_port
   tunnel_port="$(input_tunnel_port)"
 
+  # Prevent duplicate bind_port across existing server tunnels
+  if [[ "${role}" == "server" ]]; then
+    if tunnel_bind_port_taken "${tunnel_port}" "${name}"; then
+      die "Tunnel port ${tunnel_port} is already used by an existing tunnel."
+    fi
+  fi
+
   # Common defaults (per Backhaul docs), with your overrides:
   # keepalive_period default => 15 (instead of 75)
   # heartbeat default => 10 (instead of 40/20)
   local def_keepalive="15"
   local def_heartbeat="10"
 
-  local token_default
-  token_default="$( (set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16) 2>/dev/null )"
+  local token_default; token_default="$( (set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16) 2>/dev/null )"
   [[ -n "${token_default}" ]] || token_default="$(date +%s%N | sha256sum | awk '{print $1}' | cut -c1-16)"
 
   local web_port tls_info
   web_port="$(input_web_api)"
 
   if [[ "${role}" == "server" ]]; then
-    tls_info="$(input_tls_if_needed "${transport}" "server")"
+    tls_info="$(input_tls_if_needed "${transport}" "server" "${name}")"
     local bind_ip; bind_ip="$(input_nonempty "Server bind IP" "0.0.0.0")"
 
     local ports_rules; ports_rules="$(input_ports_rules_server)"
@@ -805,7 +915,7 @@ create_tunnel() {
       keepalive_period="$(input_int_range "keepalive_period (seconds)" 1 86400 "${def_keepalive}")"
     fi
 
-	nodelay="$(input_bool "nodelay (TCP_NODELAY)?" "true")"
+    nodelay="$(input_bool "nodelay (TCP_NODELAY)?" "true")"
     channel_size="$(input_int_range "channel_size" 1 1048576 "2048")"
 
     heartbeat="${def_heartbeat}"
@@ -999,9 +1109,11 @@ tunnel_actions() {
   fi
 
   local tname; tname="$(pick_tunnel)"
-  tname="$(printf '%s' "$tname" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  tname="$(printf '%s' "$tname" | tr -d '
+' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [[ -n "${tname}" ]] || return
-  local line; line="$(awk -F'|' -v n="${tname}" '{ gsub(/\r/,"",$1); if ($1==n) { print; exit } }' "${DB_FILE}")"
+  local line; line="$(awk -F'|' -v n="${tname}" '{ gsub(/
+/,"",$1); if ($1==n) { print; exit } }' "${DB_FILE}")"
   [[ -n "${line}" ]] || die "Internal error: tunnel record missing."
   local name role trans conf svc
   IFS='|' read -r name role trans conf svc <<< "${line}"
@@ -1039,6 +1151,7 @@ tunnel_actions() {
         if ask_yes_no "Delete tunnel '${name}' (service + config)?" "n"; then
           systemd_stop_disable "${svc}"
           rm -f "${SYSTEMD_DIR}/${svc}" "${conf}" || true
+          rm -rf "${TLS_BASE_DIR}/${name}" || true
           systemctl daemon-reload
           db_remove "${name}"
           tty_out "Deleted."
