@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.6)
+# Backhaul Manager (v1.0.7)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.6"
+MANAGER_VERSION="v1.0.7"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -535,30 +535,42 @@ input_tunnel_port() {
 }
 
 input_ports_rules_server() {
-  tty_out ""
-  tty_out "${BOLD}Server ports rules:${NC}"
-  tty_out "Examples:"
-  tty_out "  443"
-  tty_out "  443-600"
-  tty_out "  443-600:5201"
-  tty_out "  443-600=1.1.1.1:5201"
-  tty_out ""
-  tty_out "Enter ONE rule per line. Press Enter on an empty line to finish."
-  local rules=()
   while true; do
-    local line=""
-    tty_readline line "> "
-    line="$(echo -n "${line}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    [[ -z "${line}" ]] && break
-    if [[ ! "${line}" =~ ^[0-9]{1,5}(-[0-9]{1,5})?([:=]([0-9]{1,5}|([^=:\ ]+):[0-9]{1,5}))?$ ]]; then
-      tty_out "Invalid rule format. Try again."
+    tty_out ""
+    tty_out "${BOLD}Server ports rules:${NC}"
+    tty_out "Examples:"
+    tty_out "  443"
+    tty_out "  443-600"
+    tty_out "  443-600:5201"
+    tty_out "  443-600=1.1.1.1:5201"
+    tty_out ""
+    tty_out "Enter ONE rule per line. Press Enter on an empty line to finish."
+    local rules=()
+    while true; do
+      local line=""
+      tty_readline line "> "
+      line="$(echo -n "${line}" | tr -d '
+' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      [[ -z "${line}" ]] && break
+      if [[ ! "${line}" =~ ^[0-9]{1,5}(-[0-9]{1,5})?([:=]([0-9]{1,5}|([^=:\ ]+):[0-9]{1,5}))?$ ]]; then
+        tty_out "Invalid rule format. Try again."
+        continue
+      fi
+      rules+=("${line}")
+    done
+
+    if (( ${#rules[@]} == 0 )); then
+      tty_out "${RED}ERROR:${NC} At least one ports rule is required."
+      # loop again without exiting the whole script
       continue
     fi
-    rules+=("${line}")
+
+    printf "%s
+" "${rules[@]}"
+    return 0
   done
-  (( ${#rules[@]} > 0 )) || die "At least one ports rule is required."
-  printf "%s\n" "${rules[@]}"
 }
+
 
 input_web_api() {
   tty_out ""
@@ -617,61 +629,95 @@ ensure_tls_for_tunnel() {
     rm -f "${cert_out}" "${key_out}" "${meta_out}" || true
   fi
 
-  tty_out ""
-  tty_out "${BOLD}TLS required for this transport.${NC}"
-  tty_out "1) Let's Encrypt (standalone, uses port 80)"
-  tty_out "2) Self-signed"
-  local method
-  tty_readline method "Select TLS method (1-2) [default: 1]: "
-  method="${method:-1}"
+  while true; do
+    tty_out ""
+    tty_out "${BOLD}TLS required for this transport.${NC}"
+    tty_out "1) Let's Encrypt (standalone, uses port 80)"
+    tty_out "2) Self-signed"
+    local method
+    tty_readline method "Select TLS method (1-2) [default: 1]: "
+    method="${method:-1}"
 
-  if [[ "${method}" == "1" ]]; then
-    local domain email
-    tty_readline domain "Domain (FQDN) for Let's Encrypt: "
-    [[ -n "${domain}" ]] || die "Domain is required for Let's Encrypt."
-    tty_readline email "Email [default: admin@${domain}]: "
-    email="${email:-admin@${domain}}"
+    if [[ "${method}" == "1" ]]; then
+      local domain email
+      tty_readline domain "Domain (FQDN) for Let's Encrypt: "
+      domain="$(printf '%s' "$domain" | tr -d '
+' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      if [[ -z "${domain}" ]]; then
+        tty_out "${RED}ERROR:${NC} Domain is required for Let's Encrypt."
+        continue
+      fi
+      tty_readline email "Email [default: admin@${domain}]: "
+      email="$(printf '%s' "$email" | tr -d '
+' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      email="${email:-admin@${domain}}"
 
-    port_in_use 80 && die "Port 80 is in use. Free port 80 for Let's Encrypt, or use Self-signed."
-    ensure_certbot
+      if port_in_use 80; then
+        tty_out "${RED}ERROR:${NC} Port 80 is in use. Free port 80 for Let's Encrypt, or choose Self-signed."
+        continue
+      fi
 
-    certbot certonly --standalone \
-      -d "${domain}" \
-      --non-interactive --agree-tos -m "${email}" || die "certbot failed"
+      ensure_certbot
+      if ! certbot certonly --standalone \
+        -d "${domain}" \
+        --non-interactive --agree-tos -m "${email}"; then
+        tty_out "${RED}ERROR:${NC} certbot failed. Check DNS (A/AAAA record) and inbound port 80 reachability."
+        continue
+      fi
 
-    cp -f "/etc/letsencrypt/live/${domain}/fullchain.pem" "${cert_out}"
-    cp -f "/etc/letsencrypt/live/${domain}/privkey.pem" "${key_out}"
-    chmod 600 "${key_out}" || true
-    cat > "${meta_out}" <<EOF
+      if [[ ! -f "/etc/letsencrypt/live/${domain}/fullchain.pem" || ! -f "/etc/letsencrypt/live/${domain}/privkey.pem" ]]; then
+        tty_out "${RED}ERROR:${NC} Let's Encrypt files not found after certbot run."
+        continue
+      fi
+
+      cp -f "/etc/letsencrypt/live/${domain}/fullchain.pem" "${cert_out}"
+      cp -f "/etc/letsencrypt/live/${domain}/privkey.pem" "${key_out}"
+      chmod 600 "${key_out}" || true
+      cat > "${meta_out}" <<EOF
 method=letsencrypt
 domain=${domain}
 email=${email}
 EOF
-  else
-    local cn days
-    tty_readline cn "Certificate CN (domain or ip) [default: localhost]: "
-    cn="${cn:-localhost}"
-    tty_readline days "Validity days [default: 3650]: "
-    days="${days:-3650}"
+      break
 
-    ensure_openssl
-    openssl req -x509 -newkey rsa:2048 -nodes \
-      -keyout "${key_out}" \
-      -out "${cert_out}" \
-      -days "${days}" \
-      -subj "/CN=${cn}" || die "openssl self-signed failed"
+    elif [[ "${method}" == "2" ]]; then
+      local cn days
+      tty_readline cn "Certificate CN (domain or ip) [default: localhost]: "
+      cn="$(printf '%s' "$cn" | tr -d '
+' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      cn="${cn:-localhost}"
+      tty_readline days "Validity days [default: 3650]: "
+      days="${days:-3650}"
 
-    chmod 600 "${key_out}" || true
-    cat > "${meta_out}" <<EOF
+      ensure_openssl
+      if ! openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "${key_out}" \
+        -out "${cert_out}" \
+        -days "${days}" \
+        -subj "/CN=${cn}"; then
+        tty_out "${RED}ERROR:${NC} openssl self-signed generation failed."
+        continue
+      fi
+
+      chmod 600 "${key_out}" || true
+      cat > "${meta_out}" <<EOF
 method=selfsigned
 cn=${cn}
 days=${days}
 EOF
-  fi
+      break
+    else
+      tty_out "${RED}ERROR:${NC} Please choose 1 or 2."
+      continue
+    fi
+  done
 
-  [[ -f "${cert_out}" && -f "${key_out}" ]] || die "TLS generation failed."
+  if [[ ! -f "${cert_out}" || ! -f "${key_out}" ]]; then
+    die "TLS generation failed."
+  fi
   echo "${cert_out}|${key_out}"
 }
+
 
 
 input_tls_if_needed() {
@@ -876,14 +922,14 @@ create_tunnel() {
   tty_out "Selected transport: ${BOLD}${transport}${NC}"
 
   local tunnel_port
-  tunnel_port="$(input_tunnel_port)"
-
-  # Prevent duplicate bind_port across existing server tunnels
-  if [[ "${role}" == "server" ]]; then
-    if tunnel_bind_port_taken "${tunnel_port}" "${name}"; then
-      die "Tunnel port ${tunnel_port} is already used by an existing tunnel."
+  while true; do
+    tunnel_port="$(input_tunnel_port)"
+    if [[ "${role}" == "server" ]] && tunnel_bind_port_taken "${tunnel_port}" "${name}"; then
+      tty_out "${RED}ERROR:${NC} Tunnel port ${tunnel_port} is already used by an existing tunnel."
+      continue
     fi
-  fi
+    break
+  done
 
   # Common defaults (per Backhaul docs), with your overrides:
   # keepalive_period default => 15 (instead of 75)
@@ -1114,10 +1160,11 @@ tunnel_actions() {
     return
   fi
 
-  local tname; tname="$(pick_tunnel)"
+										 
   tname="$(printf '%s' "$tname" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [[ -n "${tname}" ]] || return
   local line; line="$(awk -F'|' -v n="${tname}" '{ gsub(/\r/,"",$1); if ($1==n) { print; exit } }' "${DB_FILE}")"
+													  
   [[ -n "${line}" ]] || die "Internal error: tunnel record missing."
   local name role trans conf svc
   IFS='|' read -r name role trans conf svc <<< "${line}"
