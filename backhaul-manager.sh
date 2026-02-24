@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.5)
+# Backhaul Manager (v1.0.6)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.5"
+MANAGER_VERSION="v1.0.6"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -535,7 +535,7 @@ input_web_api() {
   tty_out "${BOLD}Web panel (optional)${NC}"
   tty_out "Set the web panel port. Use 0 to disable."
   local web_port
-  web_port="$(input_int_range "Web port" 0 65535 "2060")"
+  web_port="$(input_int_range "Web port" 0 65535 "0")"
   if (( web_port > 0 )); then
     port_in_use "${web_port}" && die "Web port ${web_port} is in use."
   fi
@@ -805,7 +805,7 @@ create_tunnel() {
       keepalive_period="$(input_int_range "keepalive_period (seconds)" 1 86400 "${def_keepalive}")"
     fi
 
-    nodelay="$(input_bool "nodelay (TCP_NODELAY)?" "false")"
+	nodelay="$(input_bool "nodelay (TCP_NODELAY)?" "true")"
     channel_size="$(input_int_range "channel_size" 1 1048576 "2048")"
 
     heartbeat="${def_heartbeat}"
