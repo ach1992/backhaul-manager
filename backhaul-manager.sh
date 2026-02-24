@@ -55,7 +55,7 @@ on_err() {
 }
 trap on_err ERR
 
-# ---------- TTY IO helpers (fixes menus not showing inside $(...)) ----------
+# ---------- TTY IO helpers ----------
 tty_out() { printf "%b\n" "$*" > /dev/tty; }
 tty_print() { printf "%b" "$*" > /dev/tty; }
 tty_readline() { local __var="$1"; shift; IFS= read -r -p "$*" "${__var}" < /dev/tty; }
