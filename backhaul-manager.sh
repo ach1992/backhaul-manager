@@ -515,7 +515,7 @@ choose_role() {
   tty_out ""
   tty_out "${BOLD}Select node role for this tunnel:${NC}"
   tty_out "  1) Iran (Server)   - runs server config (bind/listen + ports rules)"
-  tty_out "  2) Outside (Client) - runs client config (remote_addr to server)"
+  tty_out "  2) Kharej (Client) - runs client config (remote_addr to server)"
   local c; c="$(input_int_range "Enter choice" 1 2 "1")"
   case "${c}" in
     1) echo "server" ;;
@@ -1215,7 +1215,7 @@ tunnel_actions() {
     tty_out "6) Delete tunnel"
     tty_out "0) Back"
     tty_out ""
-    local c; c="$(input_int_range "Choice" 0 6 "0")"
+    local c; c="$(input_int_range "Select an item" 0 6 "0")"
     case "${c}" in
       1) systemctl status "${svc}" --no-pager || true; pause ;;
       2) systemctl restart "${svc}" || die "Failed to restart ${svc}"; tty_out "Restarted."; pause ;;
