@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Backhaul Manager - single-file installer + menu (English-only)
+# Backhaul Manager - single-file installer + menu (TEXT ONLY - no whiptail)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 
@@ -36,10 +36,9 @@ HEALTH_TIMER="/etc/systemd/system/backhaul-manager-health.timer"
 OFFLINE_DIR="/root/backhaul-manager"
 
 ########################################
-# UI helpers
+# UI helpers (TEXT ONLY)
 ########################################
-UI_MODE="auto" # whiptail | text
-HAS_WHIPTAIL=0
+UI_MODE="text"
 
 red(){ printf "\033[31m%s\033[0m\n" "$*"; }
 grn(){ printf "\033[32m%s\033[0m\n" "$*"; }
@@ -48,6 +47,15 @@ ylw(){ printf "\033[33m%s\033[0m\n" "$*"; }
 die(){
   red "ERROR: $*"
   exit 1
+}
+
+pause(){
+  echo
+  read -r -p "Press Enter to continue..." _
+}
+
+clear_screen(){
+  command -v clear >/dev/null 2>&1 && clear || true
 }
 
 need_root(){
@@ -59,58 +67,37 @@ need_root(){
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 
 init_ui(){
-  if cmd_exists whiptail; then
-    HAS_WHIPTAIL=1
-    UI_MODE="whiptail"
-  else
-    HAS_WHIPTAIL=0
-    UI_MODE="text"
-  fi
+  UI_MODE="text"
 }
 
 ui_msg(){
   local title="${1:-$MANAGER_NAME}"
   local msg="${2:-}"
-  if [[ "$UI_MODE" == "whiptail" ]]; then
-    whiptail --title "$title" --msgbox "$msg" 12 78
-  else
-    echo "== $title =="
-    echo "$msg"
-    echo
-    read -r -p "Press Enter to continue..."
-  fi
+  echo "== $title =="
+  echo -e "$msg"
+  pause
 }
 
 ui_textarea(){
   local title="${1:-$MANAGER_NAME}"
   local msg="${2:-}"
-  if [[ "$UI_MODE" == "whiptail" ]]; then
-    whiptail --title "$title" --scrolltext --msgbox "$msg" 22 90
-  else
-    echo "== $title =="
-    echo "$msg"
-    echo
-    read -r -p "Press Enter to continue..."
-  fi
+  echo "== $title =="
+  echo -e "$msg"
+  pause
 }
 
 ui_yesno(){
   local title="${1:-$MANAGER_NAME}"
   local msg="${2:-}"
-  if [[ "$UI_MODE" == "whiptail" ]]; then
-    whiptail --title "$title" --yesno "$msg" 12 78
-    return $?
-  else
-    echo "== $title =="
-    echo "$msg"
-    while true; do
-      read -r -p "y/n: " ans
-      case "${ans,,}" in
-        y|yes) return 0 ;;
-        n|no) return 1 ;;
-      esac
-    done
-  fi
+  echo "== $title =="
+  echo -e "$msg"
+  while true; do
+    read -r -p "y/n: " ans
+    case "${ans,,}" in
+      y|yes) return 0 ;;
+      n|no)  return 1 ;;
+    esac
+  done
 }
 
 ui_input(){
@@ -118,32 +105,52 @@ ui_input(){
   local prompt="${2:-}"
   local default="${3:-}"
   local out=""
-  if [[ "$UI_MODE" == "whiptail" ]]; then
-    out="$(whiptail --title "$title" --inputbox "$prompt" 12 78 "$default" 3>&1 1>&2 2>&3)" || return 1
-    printf "%s" "$out"
-  else
+
+  # title فقط برای یکدست بودن نگه داشته شده
+  if [[ -n "$default" ]]; then
     read -r -p "$prompt [$default]: " out
-    if [[ -z "$out" ]]; then out="$default"; fi
-    printf "%s" "$out"
+    [[ -z "$out" ]] && out="$default"
+  else
+    read -r -p "$prompt: " out
   fi
+
+  printf "%s" "$out"
 }
 
+# ui_menu(key label key label ...)
+# خروجی: همان key انتخاب شده
 ui_menu(){
   local title="$1"; shift
   local prompt="$1"; shift
-  if [[ "$UI_MODE" == "whiptail" ]]; then
-    whiptail --title "$title" --menu "$prompt" 20 90 12 "$@" 3>&1 1>&2 2>&3
-  else
-    echo "== $title =="
-    echo "$prompt"
-    while [[ $# -gt 0 ]]; do
-      printf "  %s) %s\n" "$1" "$2"
-      shift 2
-    done
+
+  echo "== $title =="
+  echo -e "$prompt"
+  echo
+
+  local keys=()
+  local labels=()
+  while [[ $# -gt 0 ]]; do
+    keys+=("$1")
+    labels+=("$2")
+    printf "  %s) %s\n" "$1" "$2"
+    shift 2
+  done
+
+  echo
+  while true; do
     local sel=""
     read -r -p "Choose: " sel
-    printf "%s" "$sel"
-  fi
+
+    local i
+    for i in "${!keys[@]}"; do
+      if [[ "$sel" == "${keys[$i]}" ]]; then
+        printf "%s" "$sel"
+        return 0
+      fi
+    done
+
+    echo "Invalid choice. Try again."
+  done
 }
 
 ########################################
@@ -211,12 +218,11 @@ ensure_prereqs(){
   # No full upgrade; only install missing.
   ensure_cmd tar tar
   ensure_cmd systemctl systemd
+
   if ! cmd_exists curl && ! cmd_exists wget; then
     pm_install curl >/dev/null 2>&1 || pm_install wget >/dev/null 2>&1 || die "Neither curl nor wget is available and install failed."
   fi
-  if ! cmd_exists whiptail; then
-    pm_install whiptail >/dev/null 2>&1 || pm_install newt >/dev/null 2>&1 || true
-  fi
+
   # Best-effort for port check
   pm_install iproute2 >/dev/null 2>&1 || true
 }
@@ -758,9 +764,6 @@ choose_transport(){
   echo "$sel"
 }
 
-# Create server ports rules based on:
-# - listen ports list (comma-separated, supports ranges)
-# - destination mode: none (just listen), or map to local port, or map to ip:port
 # Outputs TOML lines: "rule",
 build_ports_rules_from_portlist(){
   local portlist="$1"
@@ -768,19 +771,17 @@ build_ports_rules_from_portlist(){
   local target="$3"    # empty|5201|1.2.3.4:5201|domain:5201|[v6]:5201
   local rules=()
 
-  # parse and validate port tokens
   local token
   while read -r token; do
     [[ -n "$token" ]] || continue
 
-    # Conflict checks: for ranges, check both ends to avoid heavy scanning
+    # Conflict checks
     if [[ "$token" =~ ^[0-9]+$ ]]; then
       if ! ensure_no_port_conflict "$token"; then
         ui_msg "$MANAGER_NAME" "Port conflict detected for listen port: $token\nRule not added."
         continue
       fi
     else
-      # range A-B
       local a="${token%-*}"
       local b="${token#*-}"
       if ! ensure_no_port_conflict "$a" || ! ensure_no_port_conflict "$b"; then
@@ -790,22 +791,13 @@ build_ports_rules_from_portlist(){
     fi
 
     case "$mode" in
-      none)
-        rules+=("$token")
-        ;;
-      local)
-        rules+=("${token}=${target}")
-        ;;
-      remote)
-        rules+=("${token}=${target}")
-        ;;
-      *)
-        die "Invalid port rule mode."
-        ;;
+      none)   rules+=("$token") ;;
+      local)  rules+=("${token}=${target}") ;;
+      remote) rules+=("${token}=${target}") ;;
+      *) die "Invalid port rule mode." ;;
     esac
   done < <(parse_port_list "$portlist" || true)
 
-  # Output as TOML lines
   local out=""
   local r
   for r in "${rules[@]}"; do
@@ -890,7 +882,6 @@ You can repeat and add more groups. Choose Done to finish."
 
 extract_ports_rules_from_config(){
   local cfg="$1"
-  # outputs one rule per line (raw string without quotes/commas)
   awk '
     BEGIN{inports=0}
     /^\s*ports\s*=\s*\[/{inports=1;next}
@@ -906,7 +897,6 @@ rewrite_ports_block_in_config(){
   local cfg="$1"
   local new_lines="$2"
 
-  # Remove existing ports block then append new one at end (server config)
   local tmp="/tmp/bhm_cfg_$$.toml"
   awk '
     BEGIN{inports=0}
@@ -918,7 +908,6 @@ rewrite_ports_block_in_config(){
     {print}
   ' "$cfg" > "$tmp"
 
-  # Append ports block
   cat >> "$tmp" <<EOF
 
 ports = [
@@ -971,11 +960,9 @@ ports_manage_interactive(){
 
     case "$sel" in
       1)
-        # Use wizard to create new rules lines; then parse them into array
         local new_lines
         new_lines="$(collect_ports_rules_wizard)"
         if [[ -n "$new_lines" ]]; then
-          # new_lines are quoted TOML lines; convert back to raw rule strings
           while read -r l; do
             l="${l//\"/}"
             l="${l//,/}"
@@ -997,7 +984,6 @@ ports_manage_interactive(){
           break
         done
         unset 'rules[idx-1]'
-        # re-pack
         local tmp=()
         local r
         for r in "${rules[@]}"; do tmp+=("$r"); done
@@ -1005,7 +991,6 @@ ports_manage_interactive(){
         ui_msg "$MANAGER_NAME" "Rule removed."
         ;;
       3)
-        # build TOML lines
         local out=""
         local r
         for r in "${rules[@]}"; do
@@ -1197,7 +1182,7 @@ tunnel_status_text(){
 }
 
 ########################################
-# Main actions: install/setup, create, manage, restart all, uninstall
+# Main actions
 ########################################
 install_everything(){
   ensure_prereqs
@@ -1206,10 +1191,7 @@ install_everything(){
   install_systemd_template
   install_manager_self
 
-  # Install or update core (always check)
   install_or_update_core
-
-  # Ensure health units are available (not forced enabled)
   install_health_units
 
   ui_msg "$MANAGER_NAME" \
