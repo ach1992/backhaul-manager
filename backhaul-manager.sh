@@ -19,6 +19,39 @@ APP_SCRIPT="${APP_DIR}/backhaul-manager.sh"
 APP_SYMLINK="/usr/local/bin/${APP_CMD}"
 
 CORE_BIN="/usr/local/bin/backhaul"
+normalize_core_bin() {
+  # Fix common broken install layouts where CORE_BIN becomes a directory (e.g. /usr/local/bin/backhaul/)
+  # and the real binary exists inside it.
+  if [[ -d "${CORE_BIN}" ]]; then
+    local found=""
+    # Common case: extracted archive created /usr/local/bin/backhaul/backhaul
+    if [[ -f "${CORE_BIN}/backhaul" ]]; then
+      found="${CORE_BIN}/backhaul"
+    else
+      # Try to locate an executable named 'backhaul' inside the directory (shallow search)
+      found="$(find "${CORE_BIN}" -maxdepth 3 -type f -name backhaul -perm -111 2>/dev/null | head -n1 || true)"
+      [[ -n "${found}" ]] || found="$(find "${CORE_BIN}" -maxdepth 3 -type f -name backhaul 2>/dev/null | head -n1 || true)"
+    fi
+
+    if [[ -n "${found}" && -f "${found}" ]]; then
+      tty_out "${YELLOW}WARN:${NC} ${CORE_BIN} is a directory. Repairing by moving binary from ${found} to ${CORE_BIN}..."
+      local tmp="/tmp/backhaul.bin.$$"
+      install -m 0755 "${found}" "${tmp}" || die "Failed to stage repaired core binary"
+      rm -rf "${CORE_BIN}" || true
+      install -m 0755 "${tmp}" "${CORE_BIN}" || die "Failed to install repaired core binary"
+      rm -f "${tmp}" || true
+    else
+      tty_out "${YELLOW}WARN:${NC} ${CORE_BIN} is a directory but no 'backhaul' binary was found inside. Removing directory so install/update can proceed."
+      rm -rf "${CORE_BIN}" || true
+    fi
+  fi
+
+  # Ensure executable bit if the file exists
+  if [[ -f "${CORE_BIN}" && ! -x "${CORE_BIN}" ]]; then
+    chmod +x "${CORE_BIN}" 2>/dev/null || true
+  fi
+}
+
 
 CONF_DIR="/etc/backhaul-manager"
 TUNNELS_DIR="${CONF_DIR}/tunnels"
@@ -125,7 +158,7 @@ realpath_soft() {
 }
 
 core_version() {
-  if [[ -x "${CORE_BIN}" ]]; then "${CORE_BIN}" -v 2>/dev/null || true; else echo ""; fi
+  if [[ -f "${CORE_BIN}" && -x "${CORE_BIN}" ]]; then "${CORE_BIN}" -v 2>/dev/null || true; else echo ""; fi
 }
 
 print_header() {
@@ -136,7 +169,7 @@ print_header() {
   tty_out "${GRAY}Manager repo:${NC} ${MANAGER_REPO_URL}"
   tty_out "${GRAY}Core repo:   ${NC} ${CORE_REPO_URL}"
   tty_out "${GRAY}Manager ver: ${NC} ${BOLD}${MANAGER_VERSION}${NC}"
-  tty_out "${GRAY}Core binary: ${NC} ${CORE_BIN}  $( [[ -x "${CORE_BIN}" ]] && echo -e "${GREEN}[INSTALLED]${NC}" || echo -e "${RED}[NOT INSTALLED]${NC}" )"
+  tty_out "${GRAY}Core binary: ${NC} ${CORE_BIN}  $( [[ -f "${CORE_BIN}" && -x "${CORE_BIN}" ]] && echo -e "${GREEN}[INSTALLED]${NC}" || echo -e "${RED}[NOT INSTALLED]${NC}" )"
   local ver; ver="$(core_version)"
   [[ -n "${ver}" ]] && tty_out "${GRAY}Core ver:    ${NC} ${BOLD}${ver}${NC}"
   tty_out ""
@@ -415,6 +448,7 @@ download_core_online() {
 }
 
 install_core_from_tar() {
+  normalize_core_bin
   local tarfile="$1"
   local tmpdir="/tmp/backhaul-core.$$"
   mkdir -p "${tmpdir}"
@@ -425,7 +459,8 @@ install_core_from_tar() {
 }
 
 install_core() {
-  if [[ -x "${CORE_BIN}" ]]; then
+  normalize_core_bin
+  if [[ -f "${CORE_BIN}" && -x "${CORE_BIN}" ]]; then
     tty_out "${GREEN}Core already installed.${NC}"
     return 0
   fi
@@ -493,6 +528,7 @@ ensure_manager_on_disk() {
 }
 
 install_or_update() {
+  normalize_core_bin
   os_ok
   is_root || die "Run as root (sudo)."
   need_systemd
@@ -923,7 +959,7 @@ EOF
 
 
 create_tunnel() {
-  [[ -x "${CORE_BIN}" ]] || die "Core is not installed. Use Install/Update first."
+  [[ -f "${CORE_BIN}" && -x "${CORE_BIN}" ]] || die "Core is not installed. Use Install/Update first."
   ensure_dirs
   need_systemd
 
