@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.4)
+# Backhaul Manager (v1.0.3)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.4"
+MANAGER_VERSION="v1.0.3"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -774,7 +774,9 @@ create_tunnel() {
   local def_keepalive="15"
   local def_heartbeat="10"
 
-  local token_default; token_default="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+  local token_default
+  token_default="$( (set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16) 2>/dev/null )"
+  [[ -n "${token_default}" ]] || token_default="$(date +%s%N | sha256sum | awk '{print $1}' | cut -c1-16)"
 
   local web_port tls_info
   web_port="$(input_web_api)"
