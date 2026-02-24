@@ -43,7 +43,7 @@ RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; BLUE="\033[34m"; CYAN="\033
 
 # ---------- logging ----------
 mkdir -p "${LOG_DIR}" 2>/dev/null || true
-log() { echo -e "[$(date '+%F %T')] $*" | tee -a "${LOG_FILE}" >/dev/null; }
+log() { echo -e "[$(date '+%F %T')] $*" | tee -a "${LOG_FILE}"; }
 die() { echo -e "${RED}ERROR:${NC} $*" >&2; log "ERROR: $*"; exit 1; }
 
 on_err() {
