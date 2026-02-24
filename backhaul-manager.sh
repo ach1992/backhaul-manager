@@ -13,9 +13,6 @@ trap 'echo -e "\033[31mERROR:\033[0m Script failed at line $LINENO (exit=$?)" >&
 MANAGER_NAME="Backhaul Manager"
 MANAGER_CMD="backhaul-manager"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
-
-# اگر اسم فایل اسکریپت در repo فرق دارد، این URL را مطابق فایل درست کن
-# (مثلاً main.sh یا backhaul-manager.sh و ...)
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
 
 CORE_REPO="Musixal/Backhaul"
@@ -111,7 +108,6 @@ ui_input(){
   local default="${3:-}"
   local out=""
 
-  # title فقط برای یکدست بودن نگه داشته شده
   if [[ -n "$default" ]]; then
     read -r -p "$prompt [$default]: " out
     [[ -z "$out" ]] && out="$default"
@@ -123,7 +119,6 @@ ui_input(){
 }
 
 # ui_menu(title prompt key label key label ...)
-# خروجی: همان key انتخاب شده
 ui_menu(){
   local title="$1"; shift
   local prompt="$1"; shift
@@ -224,12 +219,10 @@ ensure_cmd(){
 ensure_prereqs(){
   ensure_cmd tar tar
 
-  # دانلود
   if ! cmd_exists curl && ! cmd_exists wget; then
     pm_install curl >/dev/null 2>&1 || pm_install wget >/dev/null 2>&1 || die "Neither curl nor wget is available and install failed."
   fi
 
-  # systemd check (خیلی مهم برای مشکل منو/سرویس)
   if ! cmd_exists systemctl; then
     die "systemctl not found. This manager requires systemd (systemctl). If you are on Alpine/Container without systemd, it will not work."
   fi
@@ -309,21 +302,17 @@ manager_installed(){
   [[ -x "$MANAGER_INSTALL_PATH" ]]
 }
 
-# تشخیص اینکه اسکریپت از stdin اجرا شده یا نه
 running_from_stdin(){
   # اگر FD0 pipe باشد (curl | bash) => true
   [[ -p /dev/stdin ]]
 }
 
-# مسیر واقعی سورس
 script_source_path(){
-  # بهترین روش در bash
   local src="${BASH_SOURCE[0]:-}"
   [[ -n "$src" ]] && echo "$src" || echo "$0"
 }
 
 install_manager_self(){
-  # اگر قبلاً نصب شده، کاری نکن (اما اگر نصب خراب بود، کاربر می‌تونه uninstall کنه)
   if manager_installed; then
     return 0
   fi
@@ -331,7 +320,6 @@ install_manager_self(){
   local src
   src="$(script_source_path)"
 
-  # اگر از stdin اجرا شد یا فایل قابل‌کپی نبود، از GitHub raw دانلود کن
   if running_from_stdin || [[ ! -f "$src" ]]; then
     ylw "Installing manager from GitHub raw..."
     local tmp="/tmp/backhaul-manager-install.sh"
@@ -341,7 +329,6 @@ install_manager_self(){
     return 0
   fi
 
-  # اگر src روی bash یا sh اشاره کرد، جلوگیری کن
   local bn
   bn="$(basename "$src")"
   if [[ "$bn" == "bash" || "$bn" == "sh" ]]; then
@@ -353,7 +340,6 @@ install_manager_self(){
     return 0
   fi
 
-  # نصب از فایل محلی
   install -m 0755 "$src" "$MANAGER_INSTALL_PATH" || die "Failed to copy manager to ${MANAGER_INSTALL_PATH}"
 }
 
@@ -505,7 +491,6 @@ disable_health_timer(){
 
 ########################################
 # Tunnel helpers and the rest of your original script
-# (از اینجا به بعد تقریباً همان کد قبلی است، فقط بدون تغییرات بی‌ربط)
 ########################################
 
 health_check_run(){
@@ -1511,8 +1496,6 @@ install_manager_self
 install_health_units
 handle_cli "$@"
 
-# اگر الان از مسیر نصب‌شده اجرا نشده‌ایم، از اینجا به بعد همان نسخه نصب‌شده را اجرا کن
-# این باعث می‌شود مشکل "نصب از stdin" و "نسخه‌های مختلف" به هم نخورد.
 if [[ "$(command -v "$MANAGER_CMD" 2>/dev/null || true)" == "$MANAGER_INSTALL_PATH" ]] && [[ "${BASH_SOURCE[0]}" != "$MANAGER_INSTALL_PATH" ]]; then
   exec "$MANAGER_INSTALL_PATH" "$@"
 fi
