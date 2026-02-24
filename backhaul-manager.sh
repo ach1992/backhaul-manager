@@ -317,9 +317,10 @@ arch_to_asset() {
 }
 
 fetch_latest_tag() {
-  local tag
-  tag="$(curl -fsSL "${CORE_API_LATEST}" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-  [[ -n "${tag}" ]] || die "Failed to determine latest release tag from GitHub API."
+  local json tag
+  json="$(curl -fsSL "${CORE_API_LATEST}")" || die "Failed to reach GitHub API: ${CORE_API_LATEST}"
+  tag="$(printf "%s" "${json}" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')" || true
+  [[ -n "${tag}" ]] || die "Failed to parse latest release tag from GitHub API response."
   echo "${tag}"
 }
 
@@ -391,8 +392,10 @@ ensure_manager_on_disk() {
 
   # Otherwise (stdin/pipe or unknown), download from RAW url.
   echo -e "${BLUE}Ensuring manager script on disk (downloading from repo)...${NC}"
-  curl -fsSL "${MANAGER_RAW_URL}" -o "${APP_SCRIPT}" || die "Failed to download manager script from ${MANAGER_RAW_URL}"
-  chmod +x "${APP_SCRIPT}"
+  local tmp="/tmp/backhaul-manager.sh.$$"
+  curl -fsSL "${MANAGER_RAW_URL}" -o "${tmp}" || die "Failed to download manager script from ${MANAGER_RAW_URL}"
+  install -m 0755 "${tmp}" "${APP_SCRIPT}"
+  rm -f "${tmp}" || true
 }
 
 install_or_update() {
