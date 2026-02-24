@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.9)
+# Backhaul Manager (v1.0.10)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.9"
+MANAGER_VERSION="v1.0.10"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -1188,12 +1188,12 @@ tunnel_actions() {
   if [[ ! -s "${DB_FILE}" ]]; then
     tty_out "No tunnels found."
     pause
-    return
+    return 0
   fi
 
   local tname; tname="$(pick_tunnel)"
   tname="$(printf '%s' "$tname" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  [[ -n "${tname}" ]] || return
+  [[ -n "${tname}" ]] || return 0
   local line; line="$(awk -F'|' -v n="${tname}" '{ gsub(/\r/,"",$1); if ($1==n) { print; exit } }' "${DB_FILE}")"
   [[ -n "${line}" ]] || die "Internal error: tunnel record missing."
   local name role trans conf svc
@@ -1237,10 +1237,10 @@ tunnel_actions() {
           db_remove "${name}"
           tty_out "Deleted."
           pause
-          return
+          return 0
         fi
         ;;
-      0) return ;;
+      0) return 0 ;;
     esac
   done
 }
@@ -1481,7 +1481,7 @@ main_menu() {
     tty_out "6) Uninstall"
     tty_out "0) Exit"
     tty_out ""
-    local c; c="$(input_int_range "Choice" 0 6 "0")"
+    local c; c="$(input_int_range "Choice" 0 6 "")"
     case "${c}" in
       1) install_or_update; pause ;;
       2) create_tunnel ;;
