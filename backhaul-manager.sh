@@ -1174,11 +1174,10 @@ tunnel_actions() {
     return
   fi
 
-										 
+  local tname; tname="$(pick_tunnel)"
   tname="$(printf '%s' "$tname" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [[ -n "${tname}" ]] || return
   local line; line="$(awk -F'|' -v n="${tname}" '{ gsub(/\r/,"",$1); if ($1==n) { print; exit } }' "${DB_FILE}")"
-													  
   [[ -n "${line}" ]] || die "Internal error: tunnel record missing."
   local name role trans conf svc
   IFS='|' read -r name role trans conf svc <<< "${line}"
