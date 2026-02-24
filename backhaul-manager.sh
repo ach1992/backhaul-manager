@@ -123,16 +123,17 @@ ui_menu(){
   local title="$1"; shift
   local prompt="$1"; shift
 
-  echo "== $title =="
+  clear_screen
+  echo "=============================="
+  echo "  $title"
+  echo "=============================="
   echo -e "$prompt"
   echo
 
   local keys=()
-  local labels=()
   while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || break
     keys+=("$1")
-    labels+=("$2")
     printf "  %s) %s\n" "$1" "$2"
     shift 2
   done
@@ -141,7 +142,6 @@ ui_menu(){
   while true; do
     local sel=""
     read -r -p "Choose: " sel
-
     local i
     for i in "${!keys[@]}"; do
       if [[ "$sel" == "${keys[$i]}" ]]; then
@@ -149,7 +149,6 @@ ui_menu(){
         return 0
       fi
     done
-
     echo "Invalid choice. Try again."
   done
 }
@@ -1501,9 +1500,10 @@ if [[ "$(command -v "$MANAGER_CMD" 2>/dev/null || true)" == "$MANAGER_INSTALL_PA
 fi
 
 if ! core_installed; then
-  if ui_yesno "$MANAGER_NAME" "Core is not installed.\nRun setup now (install/update core + manager)?"; then
-    install_everything
-  fi
+  clear_screen
+  echo "First run: installing prerequisites + manager + core..."
+  echo
+  install_everything
 fi
 
 main_menu
