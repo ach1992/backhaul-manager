@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.3)
+# Backhaul Manager (v1.0.5)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.3"
+MANAGER_VERSION="v1.0.5"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -941,7 +941,6 @@ create_tunnel() {
 
 # ---------- management ----------
 list_tunnels_screen() {
-  print_header
   tty_out "${BOLD}Tunnels${NC}"
   tty_out ""
   if [[ ! -s "${DB_FILE}" ]]; then
@@ -953,7 +952,7 @@ list_tunnels_screen() {
   local i=0
   while IFS='|' read -r name role trans conf svc; do
     [[ -z "${name:-}" ]] && continue
-    ((i++))
+    ((++i))
     local st; st="$(systemd_status_line "${svc}")"
     printf "%-4s %-20s %-8s %-8s %-30s %-20b\n" "${i}" "${name}" "${role}" "${trans}" "$(basename "${conf}")" "${st}" > /dev/tty
   done < "${DB_FILE}"
@@ -1000,8 +999,9 @@ tunnel_actions() {
   fi
 
   local tname; tname="$(pick_tunnel)"
+  tname="$(printf '%s' "$tname" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [[ -n "${tname}" ]] || return
-  local line; line="$(awk -F'|' -v n="${tname}" '$1==n {print; exit}' "${DB_FILE}" || true)"
+  local line; line="$(awk -F'|' -v n="${tname}" '{ gsub(/\r/,"",$1); if ($1==n) { print; exit } }' "${DB_FILE}")"
   [[ -n "${line}" ]] || die "Internal error: tunnel record missing."
   local name role trans conf svc
   IFS='|' read -r name role trans conf svc <<< "${line}"
