@@ -2,7 +2,6 @@
 
 **Backhaul Manager** is an interactive (menu-driven) Bash tool that installs the Backhaul core binary, creates/manages Backhaul tunnels, and optionally sets up automated restarts and health-checks using **systemd timers** or **cron**.
 
-> Manager repo: https://github.com/ach1992/backhaul-manager/  
 > Backhaul core repo: https://github.com/Musixal/Backhaul
 
 ---
