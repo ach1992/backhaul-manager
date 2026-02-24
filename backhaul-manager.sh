@@ -2,11 +2,17 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager
-# Single-file installer + manager (systemd)
-# Repo: https://github.com/ach1992/backhaul-manager/
-# Core: https://github.com/Musixal/Backhaul
+# Backhaul Manager (v1.0.1)
+# Manager Repo: https://github.com/ach1992/backhaul-manager/
+# Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
+
+MANAGER_VERSION="1.0.1"
+MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
+CORE_REPO_URL="https://github.com/Musixal/Backhaul"
+
+# Raw URL for self-install/update (critical for curl|bash installs)
+MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
 
 APP_NAME="Backhaul Manager"
 APP_CMD="backhaul-manager"
@@ -56,29 +62,12 @@ is_root() { [[ "${EUID}" -eq 0 ]]; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 pause() { read -r -p "Press Enter to continue..." _; }
 
-print_header() {
-  clear || true
-  echo -e "${BOLD}${CYAN}=============================================${NC}"
-  echo -e "${BOLD}${CYAN}              ${APP_NAME}${NC}"
-  echo -e "${BOLD}${CYAN}=============================================${NC}"
-  echo -e "${GRAY}Core binary:${NC} ${CORE_BIN}  $( [[ -x "${CORE_BIN}" ]] && echo -e "${GREEN}[INSTALLED]${NC}" || echo -e "${RED}[NOT INSTALLED]${NC}" )"
-  if [[ -x "${CORE_BIN}" ]]; then
-    local ver
-    ver="$("${CORE_BIN}" -v 2>/dev/null || true)"
-    [[ -n "${ver}" ]] && echo -e "${GRAY}Core version:${NC} ${ver}"
-  fi
-  echo
-}
-
-ensure_dirs() {
-  mkdir -p "${APP_DIR}" "${CONF_DIR}" "${TUNNELS_DIR}" "${STATE_DIR}" "${LOG_DIR}"
-  touch "${DB_FILE}"
-  chmod 700 "${APP_DIR}" "${STATE_DIR}" || true
-  chmod 755 "${CONF_DIR}" "${TUNNELS_DIR}" || true
-}
-
 need_systemd() {
   have_cmd systemctl || die "systemctl not found. This tool requires systemd."
+}
+
+os_ok() {
+  [[ "$(uname -s)" == "Linux" ]] || die "Unsupported OS: $(uname -s). Linux required."
 }
 
 detect_pkg_mgr() {
@@ -91,7 +80,6 @@ detect_pkg_mgr() {
 }
 
 pkg_install() {
-  # Installs missing packages only, no full upgrade.
   local pkgs=("$@")
   local mgr; mgr="$(detect_pkg_mgr)"
   case "${mgr}" in
@@ -116,12 +104,11 @@ pkg_install() {
 ensure_deps() {
   local missing=()
   have_cmd curl || missing+=("curl")
-  have_cmd tar || missing+=("tar")
-  have_cmd awk || missing+=("gawk")
-  have_cmd sed || missing+=("sed")
+  have_cmd tar  || missing+=("tar")
+  have_cmd awk  || missing+=("gawk")
+  have_cmd sed  || missing+=("sed")
   have_cmd grep || missing+=("grep")
-  have_cmd uname || missing+=("coreutils")
-  have_cmd ss || missing+=("iproute2")
+  have_cmd ss   || missing+=("iproute2")
 
   if (( ${#missing[@]} > 0 )); then
     echo -e "${YELLOW}Installing missing dependencies:${NC} ${missing[*]}"
@@ -129,20 +116,43 @@ ensure_deps() {
   fi
 }
 
-arch_to_asset() {
-  local arch; arch="$(uname -m)"
-  case "${arch}" in
-    x86_64|amd64) echo "backhaul_linux_amd64.tar.gz" ;;
-    aarch64|arm64) echo "backhaul_linux_arm64.tar.gz" ;;
-    *)
-      die "Unsupported architecture: ${arch}. Supported: amd64, arm64."
-      ;;
-  esac
+ensure_dirs() {
+  mkdir -p "${APP_DIR}" "${CONF_DIR}" "${TUNNELS_DIR}" "${STATE_DIR}" "${LOG_DIR}"
+  touch "${DB_FILE}"
+  chmod 700 "${APP_DIR}" "${STATE_DIR}" || true
+  chmod 755 "${CONF_DIR}" "${TUNNELS_DIR}" || true
 }
 
-os_ok() {
-  # We mainly support Linux with systemd. The core assets are Linux builds.
-  [[ "$(uname -s)" == "Linux" ]] || die "Unsupported OS: $(uname -s). Linux required."
+realpath_soft() {
+  # best-effort realpath without requiring coreutils realpath
+  local p="$1"
+  if have_cmd readlink; then
+    readlink -f "$p" 2>/dev/null || echo "$p"
+  else
+    echo "$p"
+  fi
+}
+
+core_version() {
+  if [[ -x "${CORE_BIN}" ]]; then
+    "${CORE_BIN}" -v 2>/dev/null || true
+  else
+    echo ""
+  fi
+}
+
+print_header() {
+  clear || true
+  echo -e "${BOLD}${CYAN}================================================${NC}"
+  echo -e "${BOLD}${CYAN}                 ${APP_NAME}${NC}"
+  echo -e "${BOLD}${CYAN}================================================${NC}"
+  echo -e "${GRAY}Manager repo:${NC} ${MANAGER_REPO_URL}"
+  echo -e "${GRAY}Core repo:   ${NC} ${CORE_REPO_URL}"
+  echo -e "${GRAY}Manager ver: ${NC} ${BOLD}${MANAGER_VERSION}${NC}"
+  echo -e "${GRAY}Core binary: ${NC} ${CORE_BIN}  $( [[ -x "${CORE_BIN}" ]] && echo -e "${GREEN}[INSTALLED]${NC}" || echo -e "${RED}[NOT INSTALLED]${NC}" )"
+  local ver; ver="$(core_version)"
+  [[ -n "${ver}" ]] && echo -e "${GRAY}Core ver:    ${NC} ${BOLD}${ver}${NC}"
+  echo
 }
 
 ask_yes_no() {
@@ -199,16 +209,12 @@ input_int_range() {
   done
 }
 
-# Validate: IPv4 / Domain / IPv6 (bracketed is accepted for host:port)
+# Validate: IPv4 / Domain / IPv6 (bracketed for host:port)
 is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 is_domain() { [[ "$1" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]]; }
 is_ipv6() { [[ "$1" =~ ^[0-9a-fA-F:]+$ ]]; }
 
 validate_hostport() {
-  # Accept:
-  #   ipv4:port
-  #   domain:port
-  #   [ipv6]:port
   local v="$1"
   if [[ "${v}" =~ ^\[([0-9a-fA-F:]+)\]:([0-9]{1,5})$ ]]; then
     local h="${BASH_REMATCH[1]}" p="${BASH_REMATCH[2]}"
@@ -221,7 +227,6 @@ validate_hostport() {
     (( p>=1 && p<=65535 )) || return 1
     is_ipv4 "${h}" && return 0
     is_domain "${h}" && return 0
-    # allow raw ipv6 without brackets? no, because host:port becomes ambiguous.
     return 1
   fi
   return 1
@@ -251,45 +256,24 @@ port_in_use() {
   ss -lntup 2>/dev/null | awk '{print $4}' | grep -E "[:.]${port}\$" -q
 }
 
-db_has_tunnel() {
-  local name="$1"
-  grep -E "^${name}\|" "${DB_FILE}" -q
-}
-
+# ---------- DB ----------
+db_has_tunnel() { grep -E "^${1}\|" "${DB_FILE}" -q; }
 db_add_or_update() {
   local name="$1" role="$2" transport="$3" conf="$4" svc="$5"
-  # name|role|transport|conf|service
   if db_has_tunnel "${name}"; then
     sed -i "s#^${name}|.*#${name}|${role}|${transport}|${conf}|${svc}#g" "${DB_FILE}"
   else
     echo "${name}|${role}|${transport}|${conf}|${svc}" >> "${DB_FILE}"
   fi
 }
+db_remove() { sed -i "/^${1}\|/d" "${DB_FILE}"; }
 
-db_remove() {
-  local name="$1"
-  sed -i "/^${name}\|/d" "${DB_FILE}"
-}
-
-db_list() {
-  # prints lines
-  cat "${DB_FILE}" 2>/dev/null || true
-}
-
-svc_name_for() {
-  local name="$1"
-  echo "backhaul-${name}.service"
-}
-
-conf_path_for() {
-  local name="$1"
-  echo "${TUNNELS_DIR}/${name}.toml"
-}
+svc_name_for() { echo "backhaul-${1}.service"; }
+conf_path_for() { echo "${TUNNELS_DIR}/${1}.toml"; }
 
 systemd_write_unit() {
   local svc="$1" conf="$2"
   local unit="${SYSTEMD_DIR}/${svc}"
-
   cat > "${unit}" <<EOF
 [Unit]
 Description=Backhaul Tunnel (${svc})
@@ -306,37 +290,33 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-
   systemctl daemon-reload
 }
 
-systemd_enable_start() {
-  local svc="$1"
-  systemctl enable --now "${svc}" >/dev/null
-}
-
-systemd_stop_disable() {
-  local svc="$1"
-  systemctl disable --now "${svc}" >/dev/null 2>&1 || true
-}
+systemd_enable_start() { systemctl enable --now "$1" >/dev/null; }
+systemd_stop_disable() { systemctl disable --now "$1" >/dev/null 2>&1 || true; }
 
 systemd_status_line() {
   local svc="$1"
   if systemctl is-enabled "${svc}" >/dev/null 2>&1; then
     local st; st="$(systemctl is-active "${svc}" 2>/dev/null || true)"
-    if [[ "${st}" == "active" ]]; then
-      echo -e "${GREEN}active${NC}"
-    else
-      echo -e "${YELLOW}${st}${NC}"
-    fi
+    [[ "${st}" == "active" ]] && echo -e "${GREEN}active${NC}" || echo -e "${YELLOW}${st}${NC}"
   else
     echo -e "${GRAY}not-enabled${NC}"
   fi
 }
 
 # ---------- core install ----------
+arch_to_asset() {
+  local arch; arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64) echo "backhaul_linux_amd64.tar.gz" ;;
+    aarch64|arm64) echo "backhaul_linux_arm64.tar.gz" ;;
+    *) die "Unsupported architecture: ${arch}. Supported: amd64, arm64." ;;
+  esac
+}
+
 fetch_latest_tag() {
-  # Prefer GitHub API for latest tag
   local tag
   tag="$(curl -fsSL "${CORE_API_LATEST}" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
   [[ -n "${tag}" ]] || die "Failed to determine latest release tag from GitHub API."
@@ -347,7 +327,6 @@ download_core_online() {
   local asset="$1" tag="$2"
   local url="${CORE_RELEASES_URL}/download/${tag}/${asset}"
   local tmp="/tmp/${asset}"
-
   echo -e "${BLUE}Downloading core:${NC} ${url}"
   curl -fL --retry 3 --retry-delay 2 -o "${tmp}" "${url}" || die "Failed to download core asset."
   echo "${tmp}"
@@ -358,7 +337,6 @@ install_core_from_tar() {
   local tmpdir="/tmp/backhaul-core.$$"
   mkdir -p "${tmpdir}"
   tar -xzf "${tarfile}" -C "${tmpdir}" || die "Failed to extract ${tarfile}"
-
   [[ -f "${tmpdir}/backhaul" ]] || die "Extracted archive does not contain 'backhaul' binary."
   install -m 0755 "${tmpdir}/backhaul" "${CORE_BIN}"
   rm -rf "${tmpdir}" || true
@@ -374,13 +352,11 @@ install_core() {
   local tarfile=""
 
   local can_offline="no"
-  if [[ -d "${OFFLINE_DIR}" ]]; then
-    if [[ -f "${OFFLINE_DIR}/${asset}" ]]; then
-      can_offline="yes"
-    fi
+  if [[ -d "${OFFLINE_DIR}" && -f "${OFFLINE_DIR}/${asset}" ]]; then
+    can_offline="yes"
   fi
 
-  if [[ "${can_offline}" == "yes" ]] && ask_yes_no "Offline install detected at ${OFFLINE_DIR}. Install core offline?" "y"; then
+  if [[ "${can_offline}" == "yes" ]] && ask_yes_no "Offline core asset found at ${OFFLINE_DIR}/${asset}. Install core offline?" "y"; then
     tarfile="${OFFLINE_DIR}/${asset}"
     echo -e "${BLUE}Installing core offline from:${NC} ${tarfile}"
     install_core_from_tar "${tarfile}"
@@ -393,20 +369,45 @@ install_core() {
   rm -f "${tarfile}" || true
 }
 
-install_self() {
+# ---------- self install/update ----------
+ensure_manager_on_disk() {
+  mkdir -p "${APP_DIR}"
+
+  # If already running from the installed script, do nothing (prevents "same file" error).
+  local running; running="$(realpath_soft "${BASH_SOURCE[0]:-$0}")"
+  local installed; installed="$(realpath_soft "${APP_SCRIPT}")"
+
+  if [[ -f "${APP_SCRIPT}" && "${running}" == "${installed}" ]]; then
+    return 0
+  fi
+
+  # If running from a real file on disk (not stdin), copy it unless it's the same.
+  local src="${BASH_SOURCE[0]:-$0}"
+  local src_real; src_real="$(realpath_soft "${src}")"
+  if [[ -f "${src}" && "${src_real}" != "${installed}" ]]; then
+    install -m 0755 "${src}" "${APP_SCRIPT}"
+    return 0
+  fi
+
+  # Otherwise (stdin/pipe or unknown), download from RAW url.
+  echo -e "${BLUE}Ensuring manager script on disk (downloading from repo)...${NC}"
+  curl -fsSL "${MANAGER_RAW_URL}" -o "${APP_SCRIPT}" || die "Failed to download manager script from ${MANAGER_RAW_URL}"
+  chmod +x "${APP_SCRIPT}"
+}
+
+install_or_update() {
   os_ok
   is_root || die "Run as root (sudo)."
   need_systemd
   ensure_dirs
   ensure_deps
 
-  # Copy current script into APP_DIR
-  if [[ -f "$0" ]]; then
-    install -m 0755 "$0" "${APP_SCRIPT}"
-  fi
+  ensure_manager_on_disk
 
-  # Create symlink command
   ln -sf "${APP_SCRIPT}" "${APP_SYMLINK}"
+  chmod +x "${APP_SYMLINK}" 2>/dev/null || true
+  hash -r 2>/dev/null || true
+
   echo -e "${GREEN}Installed command:${NC} ${APP_SYMLINK}"
 
   install_core
@@ -415,82 +416,49 @@ install_self() {
   echo -e "Run: ${BOLD}${APP_CMD}${NC}"
 }
 
-# ---------- tunnel config builders ----------
+# ---------- tunnel creation helpers ----------
 choose_role() {
-  echo "Select role for this node:"
-  echo "1) Iran (Server)  - runs server config (bind/listen, ports forwarding rules)"
-  echo "2) Outside (Client) - runs client config (remote_addr to server)"
-  local c
-  while true; do
-    c="$(input_int_range "Enter choice" 1 2 "1")"
-    case "${c}" in
-      1) echo "server"; return 0 ;;
-      2) echo "client"; return 0 ;;
-    esac
-  done
+  echo
+  echo -e "${BOLD}Select node role for this tunnel:${NC}"
+  echo "  1) Iran (Server)   - runs server config (bind/listen + ports rules)"
+  echo "  2) Outside (Client) - runs client config (remote_addr to server)"
+  local c; c="$(input_int_range "Enter choice" 1 2 "1")"
+  case "${c}" in
+    1) echo "server" ;;
+    2) echo "client" ;;
+  esac
 }
 
 choose_transport() {
-  echo "Select transport:"
-  echo "1) tcp"
-  echo "2) tcpmux"
-  echo "3) udp"
-  echo "4) ws"
-  echo "5) wss"
-  echo "6) wsmux"
-  echo "7) wssmux"
-  local c
-  while true; do
-    c="$(input_int_range "Enter choice" 1 7 "1")"
-    case "${c}" in
-      1) echo "tcp"; return 0 ;;
-      2) echo "tcpmux"; return 0 ;;
-      3) echo "udp"; return 0 ;;
-      4) echo "ws"; return 0 ;;
-      5) echo "wss"; return 0 ;;
-      6) echo "wsmux"; return 0 ;;
-      7) echo "wssmux"; return 0 ;;
-    esac
-  done
+  echo
+  echo -e "${BOLD}Select transport:${NC}"
+  echo "  1) tcp"
+  echo "  2) tcpmux"
+  echo "  3) udp"
+  echo "  4) ws"
+  echo "  5) wss (TLS required)"
+  echo "  6) wsmux"
+  echo "  7) wssmux (TLS required)"
+  local c; c="$(input_int_range "Enter choice" 1 7 "1")"
+  case "${c}" in
+    1) echo "tcp" ;;
+    2) echo "tcpmux" ;;
+    3) echo "udp" ;;
+    4) echo "ws" ;;
+    5) echo "wss" ;;
+    6) echo "wsmux" ;;
+    7) echo "wssmux" ;;
+  esac
 }
 
 choose_bind_addr() {
-  # Default: 0.0.0.0
   local ip
   ip="$(input_nonempty "Bind address (IPv4) for server to listen on" "0.0.0.0")"
-  # keep simple; accept 0.0.0.0 or IPv4
   if [[ "${ip}" != "0.0.0.0" ]] && ! is_ipv4 "${ip}"; then
     echo "Invalid IPv4. Using default 0.0.0.0"
     ip="0.0.0.0"
   fi
   echo "${ip}"
-}
-
-input_ports_rules_server() {
-  echo
-  echo "Ports rules (server side) examples:"
-  echo "  443                          (forward the same port)"
-  echo "  443-600                      (range)"
-  echo "  443-600:5201                 (map all to local port 5201)"
-  echo "  443-600=1.1.1.1:5201         (map to a fixed host:port)"
-  echo
-  echo "Enter one rule per line. Empty line to finish."
-  local rules=()
-  while true; do
-    local line
-    read -r -p "> " line
-    line="$(echo -n "${line}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    [[ -z "${line}" ]] && break
-    # Basic validation (not perfect but prevents obvious mistakes)
-    if [[ ! "${line}" =~ ^[0-9]{1,5}(-[0-9]{1,5})?([:=]([0-9]{1,5}|([^=:\ ]+):[0-9]{1,5}))?$ ]]; then
-      echo "Invalid rule format. Try again."
-      continue
-    fi
-    rules+=("${line}")
-  done
-
-  (( ${#rules[@]} > 0 )) || die "At least one ports rule is required."
-  printf "%s\n" "${rules[@]}"
 }
 
 input_server_listen_port() {
@@ -500,17 +468,44 @@ input_server_listen_port() {
   echo "${p}"
 }
 
+input_ports_rules_server() {
+  echo
+  echo -e "${BOLD}Server ports rules:${NC}"
+  echo "Examples:"
+  echo "  443"
+  echo "  443-600"
+  echo "  443-600:5201"
+  echo "  443-600=1.1.1.1:5201"
+  echo
+  echo "Enter ONE rule per line. Press Enter on an empty line to finish."
+  local rules=()
+  while true; do
+    local line
+    read -r -p "> " line
+    line="$(echo -n "${line}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "${line}" ]] && break
+    if [[ ! "${line}" =~ ^[0-9]{1,5}(-[0-9]{1,5})?([:=]([0-9]{1,5}|([^=:\ ]+):[0-9]{1,5}))?$ ]]; then
+      echo "Invalid rule format. Try again."
+      continue
+    fi
+    rules+=("${line}")
+  done
+  (( ${#rules[@]} > 0 )) || die "At least one ports rule is required."
+  printf "%s\n" "${rules[@]}"
+}
+
 input_client_remote_addr() {
-  # Default: example.com:3080 is not safe; prefer prompt.
-  input_hostport "Remote address (server) in form ipv4:port, domain:port, or [ipv6]:port"
+  input_hostport "Remote address (server) (ipv4:port, domain:port, or [ipv6]:port)"
 }
 
 input_ws_path() {
-  input_nonempty "WebSocket path (start with /)" "/"
+  local p
+  p="$(input_nonempty "WebSocket path (must start with /)" "/")"
+  [[ "${p}" =~ ^/ ]] || p="/${p}"
+  echo "${p}"
 }
 
 input_web_api() {
-  # Backhaul supports web api: web_port, secret, web_addr
   if ask_yes_no "Enable web API panel?" "n"; then
     local web_addr web_port secret
     web_addr="$(input_nonempty "Web API bind address" "127.0.0.1")"
@@ -526,7 +521,7 @@ input_web_api() {
 check_port_80_hint() {
   if port_in_use 80; then
     echo -e "${YELLOW}NOTICE:${NC} Port 80 appears to be in use. Let's Encrypt standalone validation may fail."
-    echo "You said you will handle this manually if needed."
+    echo "As requested, this tool will not modify services; you can handle it manually if needed."
   else
     echo -e "${GREEN}Port 80 looks free.${NC}"
   fi
@@ -536,11 +531,9 @@ input_tls_if_needed() {
   local transport="$1"
   if [[ "${transport}" == "wss" || "${transport}" == "wssmux" ]]; then
     echo
-    echo "TLS is required for ${transport}."
+    echo -e "${BOLD}TLS configuration required for:${NC} ${transport}"
     check_port_80_hint
-    echo "Provide paths to existing TLS certificate and key."
-    echo "If you want Let's Encrypt, obtain certs first (we only provide guidance)."
-
+    echo "Provide paths to existing TLS certificate and key files."
     local cert key
     while true; do
       cert="$(input_nonempty "TLS certificate path" "/etc/letsencrypt/live/yourdomain/fullchain.pem")"
@@ -575,7 +568,6 @@ write_config_server() {
     tls_key="$(echo "${tls_info}" | cut -d'|' -f2)"
   fi
 
-  # Build ports array toml
   local ports_toml="ports = ["
   while IFS= read -r r; do
     ports_toml+="\"${r}\","
@@ -631,7 +623,6 @@ remote_addr = "${remote_addr}"
 transport = "${transport}"
 EOF
 
-  # ws/wss path is relevant for ws transports
   if [[ "${transport}" == "ws" || "${transport}" == "wss" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
     cat >> "${conf}" <<EOF
 path = "${ws_path}"
@@ -646,7 +637,6 @@ web_addr = "${web_addr}"
 EOF
   fi
 
-  # Some users might want client-side TLS for mutual? Backhaul docs focus TLS on server, but we allow if binary supports.
   if [[ -n "${tls_info}" ]]; then
     cat >> "${conf}" <<EOF
 tls_cert = "${tls_cert}"
@@ -659,7 +649,7 @@ EOF
 }
 
 create_tunnel() {
-  [[ -x "${CORE_BIN}" ]] || die "Core is not installed. Install first."
+  [[ -x "${CORE_BIN}" ]] || die "Core is not installed. Use Install/Update first."
   ensure_dirs
   need_systemd
 
@@ -669,31 +659,26 @@ create_tunnel() {
 
   local name
   while true; do
-    name="$(input_nonempty "Tunnel name (letters, numbers, dash)" "tunnel1")"
+    name="$(input_nonempty "Tunnel name (letters/numbers/_/-)" "tunnel1")"
     [[ "${name}" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Invalid name. Use letters/numbers/_/- only."; continue; }
     if db_has_tunnel "${name}"; then
       echo "Tunnel '${name}' already exists."
-      if ask_yes_no "Overwrite existing tunnel config and service?" "n"; then
-        break
-      else
-        continue
-      fi
+      ask_yes_no "Overwrite existing tunnel config and service?" "n" || continue
     fi
     break
   done
 
   local role transport
   role="$(choose_role)"
+  echo -e "Selected role: ${BOLD}${role}${NC}"
   transport="$(choose_transport)"
+  echo -e "Selected transport: ${BOLD}${transport}${NC}"
 
-  local conf=""
-  local ws_path=""
-  local web_info=""
-  local tls_info=""
-
+  local web_info tls_info
   web_info="$(input_web_api)"
   tls_info="$(input_tls_if_needed "${transport}")"
 
+  local conf=""
   if [[ "${role}" == "server" ]]; then
     local bind_addr listen_port ports_rules
     bind_addr="$(choose_bind_addr)"
@@ -701,22 +686,21 @@ create_tunnel() {
     ports_rules="$(input_ports_rules_server)"
     conf="$(write_config_server "${name}" "${transport}" "${bind_addr}" "${listen_port}" "${ports_rules}" "${web_info}" "${tls_info}")"
   else
-    local remote_addr
+    local remote_addr ws_path="/"
     remote_addr="$(input_client_remote_addr)"
     if [[ "${transport}" == "ws" || "${transport}" == "wss" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
       ws_path="$(input_ws_path)"
     fi
-    conf="$(write_config_client "${name}" "${transport}" "${remote_addr}" "${ws_path:-/}" "${web_info}" "${tls_info}")"
+    conf="$(write_config_client "${name}" "${transport}" "${remote_addr}" "${ws_path}" "${web_info}" "${tls_info}")"
   fi
 
   local svc; svc="$(svc_name_for "${name}")"
   systemd_write_unit "${svc}" "${conf}"
   systemd_enable_start "${svc}"
-
   db_add_or_update "${name}" "${role}" "${transport}" "${conf}" "${svc}"
 
   echo
-  echo -e "${GREEN}Tunnel created:${NC} ${name}"
+  echo -e "${GREEN}Tunnel created/updated:${NC} ${name}"
   echo -e "Config: ${conf}"
   echo -e "Service: ${svc} (status: $(systemd_status_line "${svc}"))"
   pause
@@ -740,7 +724,6 @@ list_tunnels_screen() {
 }
 
 pick_tunnel() {
-  # returns tunnel name
   list_tunnels_screen
   echo
   local name
@@ -787,25 +770,10 @@ tunnel_actions() {
     echo
     local c; c="$(input_int_range "Choice" 0 6 "0")"
     case "${c}" in
-      1)
-        systemctl status "${svc}" --no-pager || true
-        pause
-        ;;
-      2)
-        systemctl restart "${svc}" || die "Failed to restart ${svc}"
-        echo "Restarted."
-        pause
-        ;;
-      3)
-        systemctl stop "${svc}" || die "Failed to stop ${svc}"
-        echo "Stopped."
-        pause
-        ;;
-      4)
-        systemctl start "${svc}" || die "Failed to start ${svc}"
-        echo "Started."
-        pause
-        ;;
+      1) systemctl status "${svc}" --no-pager || true; pause ;;
+      2) systemctl restart "${svc}" || die "Failed to restart ${svc}"; echo "Restarted."; pause ;;
+      3) systemctl stop "${svc}" || die "Failed to stop ${svc}"; echo "Stopped."; pause ;;
+      4) systemctl start "${svc}" || die "Failed to start ${svc}"; echo "Started."; pause ;;
       5)
         have_cmd nano || pkg_install nano || true
         ${EDITOR:-nano} "${conf}" || true
@@ -832,6 +800,16 @@ tunnel_actions() {
 restart_all() {
   ensure_dirs
   need_systemd
+  if [[ ! -s "${DB_FILE}" ]]; then
+    return 0
+  fi
+  while IFS='|' read -r name role trans conf svc; do
+    [[ -z "${name:-}" ]] && continue
+    systemctl restart "${svc}" >/dev/null 2>&1 || true
+  done < "${DB_FILE}"
+}
+
+restart_all_ui() {
   print_header
   echo -e "${BOLD}Restart All Tunnels${NC}"
   echo
@@ -840,10 +818,7 @@ restart_all() {
     pause
     return
   fi
-  while IFS='|' read -r name role trans conf svc; do
-    [[ -z "${name:-}" ]] && continue
-    systemctl restart "${svc}" >/dev/null 2>&1 || echo "Failed to restart ${svc}"
-  done < "${DB_FILE}"
+  restart_all
   echo "Done."
   pause
 }
@@ -852,9 +827,8 @@ restart_all() {
 timer_unit_name() { echo "backhaul-manager-${1}.timer"; }
 timer_svc_name() { echo "backhaul-manager-${1}.service"; }
 
-create_timer_restart_all() {
-  local kind="$1"  # cron|timer|health
-  local hours="$2"
+create_schedule() {
+  local kind="$1" hours="$2"
 
   if [[ "${kind}" == "cron" ]]; then
     local cron_line="0 */${hours} * * * root ${APP_CMD} --restart-all >/dev/null 2>&1"
@@ -902,7 +876,6 @@ EOF
   fi
 
   if [[ "${kind}" == "health" ]]; then
-    # health-check: if any service is inactive/failed -> restart it (not restart-all blindly)
     local s="${SYSTEMD_DIR}/$(timer_svc_name health-check)"
     local t="${SYSTEMD_DIR}/$(timer_unit_name health-check)"
 
@@ -937,44 +910,31 @@ EOF
   die "Unknown schedule kind: ${kind}"
 }
 
+disable_scheduling() {
+  rm -f /etc/cron.d/backhaul-manager 2>/dev/null || true
+  systemctl disable --now "$(timer_unit_name restart-all)" >/dev/null 2>&1 || true
+  systemctl disable --now "$(timer_unit_name health-check)" >/dev/null 2>&1 || true
+  rm -f "${SYSTEMD_DIR}/$(timer_svc_name restart-all)" "${SYSTEMD_DIR}/$(timer_unit_name restart-all)" \
+        "${SYSTEMD_DIR}/$(timer_svc_name health-check)" "${SYSTEMD_DIR}/$(timer_unit_name health-check)" 2>/dev/null || true
+  systemctl daemon-reload
+}
+
 schedule_menu() {
   print_header
   echo -e "${BOLD}Scheduling (Restart / Health Check)${NC}"
   echo
-  echo "Options:"
   echo "1) Cron job (restart-all periodically)"
-  echo "2) Systemd timer (restart-all periodically) [recommended over cron]"
-  echo "3) Health-check timer (restart only if a tunnel is down) [safest]"
+  echo "2) Systemd timer (restart-all periodically)  [recommended over cron]"
+  echo "3) Health-check timer (restart only if a tunnel is down)  [safest]"
   echo "4) Disable scheduling (remove cron + timers)"
   echo "0) Back"
   echo
   local c; c="$(input_int_range "Choice" 0 4 "3")"
   case "${c}" in
-    1)
-      local h; h="$(input_int_range "Every how many hours?" 1 168 "6")"
-      create_timer_restart_all "cron" "${h}"
-      pause
-      ;;
-    2)
-      local h; h="$(input_int_range "Every how many hours?" 1 168 "6")"
-      create_timer_restart_all "timer" "${h}"
-      pause
-      ;;
-    3)
-      local h; h="$(input_int_range "Every how many hours?" 1 168 "1")"
-      create_timer_restart_all "health" "${h}"
-      pause
-      ;;
-    4)
-      rm -f /etc/cron.d/backhaul-manager 2>/dev/null || true
-      systemctl disable --now "$(timer_unit_name restart-all)" >/dev/null 2>&1 || true
-      systemctl disable --now "$(timer_unit_name health-check)" >/dev/null 2>&1 || true
-      rm -f "${SYSTEMD_DIR}/$(timer_svc_name restart-all)" "${SYSTEMD_DIR}/$(timer_unit_name restart-all)" \
-            "${SYSTEMD_DIR}/$(timer_svc_name health-check)" "${SYSTEMD_DIR}/$(timer_unit_name health-check)" 2>/dev/null || true
-      systemctl daemon-reload
-      echo "Scheduling disabled."
-      pause
-      ;;
+    1) local h; h="$(input_int_range "Every how many hours?" 1 168 "6")"; create_schedule "cron" "${h}"; pause ;;
+    2) local h; h="$(input_int_range "Every how many hours?" 1 168 "6")"; create_schedule "timer" "${h}"; pause ;;
+    3) local h; h="$(input_int_range "Every how many hours?" 1 168 "1")"; create_schedule "health" "${h}"; pause ;;
+    4) disable_scheduling; echo "Scheduling disabled."; pause ;;
     0) ;;
   esac
 }
@@ -982,9 +942,7 @@ schedule_menu() {
 health_check() {
   ensure_dirs
   need_systemd
-  if [[ ! -s "${DB_FILE}" ]]; then
-    exit 0
-  fi
+  [[ -s "${DB_FILE}" ]] || exit 0
   while IFS='|' read -r name role trans conf svc; do
     [[ -z "${name:-}" ]] && continue
     local st; st="$(systemctl is-active "${svc}" 2>/dev/null || true)"
@@ -1004,7 +962,6 @@ uninstall_all() {
     return
   fi
 
-  # Stop/disable tunnel services
   if [[ -s "${DB_FILE}" ]]; then
     while IFS='|' read -r name role trans conf svc; do
       [[ -z "${name:-}" ]] && continue
@@ -1013,16 +970,8 @@ uninstall_all() {
     done < "${DB_FILE}"
   fi
 
-  # Remove scheduling
-  rm -f /etc/cron.d/backhaul-manager 2>/dev/null || true
-  systemctl disable --now "$(timer_unit_name restart-all)" >/dev/null 2>&1 || true
-  systemctl disable --now "$(timer_unit_name health-check)" >/dev/null 2>&1 || true
-  rm -f "${SYSTEMD_DIR}/$(timer_svc_name restart-all)" "${SYSTEMD_DIR}/$(timer_unit_name restart-all)" \
-        "${SYSTEMD_DIR}/$(timer_svc_name health-check)" "${SYSTEMD_DIR}/$(timer_unit_name health-check)" 2>/dev/null || true
+  disable_scheduling
 
-  systemctl daemon-reload
-
-  # Remove files
   rm -rf "${CONF_DIR}" "${STATE_DIR}" "${LOG_DIR}" "${APP_DIR}" 2>/dev/null || true
   rm -f "${APP_SYMLINK}" 2>/dev/null || true
 
@@ -1031,7 +980,6 @@ uninstall_all() {
   fi
 
   echo -e "${GREEN}Uninstall complete.${NC}"
-  echo "If the command still exists in your shell cache, open a new shell session."
   pause
 }
 
@@ -1049,13 +997,10 @@ main_menu() {
     echo
     local c; c="$(input_int_range "Choice" 0 6 "0")"
     case "${c}" in
-      1)
-        install_self
-        pause
-        ;;
+      1) install_or_update; pause ;;
       2) create_tunnel ;;
       3) tunnel_actions ;;
-      4) restart_all ;;
+      4) restart_all_ui ;;
       5) schedule_menu ;;
       6) uninstall_all ;;
       0) exit 0 ;;
@@ -1064,13 +1009,13 @@ main_menu() {
 }
 
 # ---------- CLI flags ----------
-if [[ "${1:-}" == "--install" ]]; then
-  install_self
+if [[ "${1:-}" == "--install" || "${1:-}" == "--update" ]]; then
+  install_or_update
   exit 0
 fi
 
 if [[ "${1:-}" == "--restart-all" ]]; then
-  restart_all >/dev/null 2>&1 || true
+  restart_all
   exit 0
 fi
 
@@ -1079,5 +1024,4 @@ if [[ "${1:-}" == "--health-check" ]]; then
   exit 0
 fi
 
-# Default: interactive menu
 main_menu
