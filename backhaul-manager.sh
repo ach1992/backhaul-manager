@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.11)
+# Backhaul Manager (v1.0.12)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
@@ -1274,8 +1274,8 @@ restart_all_ui() {
   fi
 
   tty_out "${BOLD}Results:${NC}"
-  tty_out "  ${GRAY}NAME${NC}	${GRAY}SERVICE${NC}	${GRAY}RESTART${NC}	${GRAY}STATE${NC}"
-  tty_out "  ---------------------------------------------------------------"
+  tty_out "  ${GRAY}NAME${NC}         ${GRAY}SERVICE${NC}                         ${GRAY}RESTART${NC}    ${GRAY}STATE${NC}"
+  tty_out "  ------------------------------------------------------------------------------"
 
   local any_fail=0
   while IFS=$'	' read -r name svc rc st; do
@@ -1295,7 +1295,7 @@ restart_all_ui() {
       any_fail=1
     fi
 
-    tty_out "  ${name}	${svc}	${restart_label}	${state_label}"
+    tty_out "$(printf '  %-12s %-34s %-10b %-10b' "${name}" "${svc}" "${restart_label}" "${state_label}")"
   done < <(restart_all)
 
   tty_out ""
@@ -1362,6 +1362,13 @@ show_scheduling_status() {
 create_schedule() {
   local kind="$1" minutes="$2"
 
+
+  # Normalize minutes (avoid invalid/empty values that make systemd timers show Trigger=n/a)
+  if [[ -z "${minutes:-}" || ! "${minutes}" =~ ^[0-9]+$ || "${minutes}" -lt 1 ]]; then
+    minutes=5
+  fi
+
+
   if [[ "${kind}" == "cron" ]]; then
     local cron_file="/etc/cron.d/backhaul-manager"
     local cron_line=""
@@ -1404,8 +1411,10 @@ Description=Backhaul Manager - Restart All Tunnels (Timer)
 [Timer]
 Unit=$(timer_svc_name restart-all)
 OnBootSec=5min
-OnUnitInactiveSec=${minutes}min
+OnCalendar=*:0/${minutes}
 Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
 
 [Install]
 WantedBy=timers.target
@@ -1437,8 +1446,10 @@ Description=Backhaul Manager - Health Check Tunnels (Timer)
 [Timer]
 Unit=$(timer_svc_name health-check)
 OnBootSec=5min
-OnUnitInactiveSec=${minutes}min
+OnCalendar=*:0/${minutes}
 Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
 
 [Install]
 WantedBy=timers.target
