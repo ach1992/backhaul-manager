@@ -188,6 +188,75 @@ input_int_range() {
   done
 }
 
+input_int_any() {
+  local prompt="$1" default="${2:-}"
+  local v=""
+  while true; do
+    if [[ -n "${default}" ]]; then
+      tty_readline v "${prompt} [default: ${default}]: "
+      v="${v:-$default}"
+    else
+      tty_readline v "${prompt}: "
+    fi
+    v="$(echo -n "${v}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ "${v}" =~ ^-?[0-9]+$ ]] || { tty_out "Please enter an integer."; continue; }
+    echo "${v}"
+    return 0
+  done
+}
+
+input_text_allow_empty() {
+  local prompt="$1" default="${2:-}"
+  local v=""
+  if [[ -n "${default}" ]]; then
+    tty_readline v "${prompt} [default: ${default}]: "
+    v="${v:-$default}"
+  else
+    tty_readline v "${prompt}: "
+  fi
+  v="$(echo -n "${v}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  echo "${v}"
+}
+
+input_bool() {
+  local prompt="$1" default_bool="$2"  # "true" or "false"
+  local def_char="n"
+  [[ "${default_bool}" == "true" ]] && def_char="y"
+  if ask_yes_no "${prompt}" "${def_char}"; then echo "true"; else echo "false"; fi
+}
+
+input_choice_log_level() {
+  local def="${1:-info}"
+  local v=""
+  while true; do
+    tty_readline v "Log level (panic/fatal/error/warn/info/debug/trace) [default: ${def}]: "
+    v="${v:-$def}"
+    v="${v,,}"
+    case "${v}" in
+      panic|fatal|error|warn|info|debug|trace) echo "${v}"; return 0 ;;
+      *) tty_out "Invalid log level." ;;
+    esac
+  done
+}
+
+input_optional_int_or_empty() {
+  local prompt="$1"
+  local default="${2:-}"
+  local v=""
+  while true; do
+    tty_readline v "${prompt} [default: ${default}]: "
+    v="${v:-$default}"
+    v="$(echo -n "${v}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [[ -z "${v}" ]]; then
+      echo ""
+      return 0
+    fi
+    [[ "${v}" =~ ^[0-9]+$ ]] || { tty_out "Please enter a number (or leave empty)."; continue; }
+    echo "${v}"
+    return 0
+  done
+}
+
 # ---------- network validation ----------
 is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 is_domain() { [[ "$1" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]]; }
@@ -213,11 +282,15 @@ input_edge_host() {
 
 port_in_use() {
   local port="$1"
-  ss -lntup 2>/dev/null | awk '{print $4}' | grep -E "[:.]${port}\$" -q
+  # Check both TCP and UDP listeners for the given port
+  ss -lntup 2>/dev/null | awk '{print $4}' | grep -E "[:.]${port}\$" -q && return 0
+  ss -lnup  2>/dev/null | awk '{print $4}' | grep -E "[:.]${port}\$" -q && return 0
+  return 1
 }
 
+
 # ---------- DB ----------
-db_has_tunnel() { grep -E "^${1}\|" "${DB_FILE}" -q; }
+db_has_tunnel() { awk -F'|' -v n="$1" '$1==n{found=1} END{exit !found}' "${DB_FILE}"; }
 db_add_or_update() {
   local name="$1" role="$2" transport="$3" conf="$4" svc="$5"
   if db_has_tunnel "${name}"; then
@@ -458,17 +531,17 @@ input_ports_rules_server() {
 }
 
 input_web_api() {
-  if ask_yes_no "Enable web API panel?" "n"; then
-    local web_addr web_port secret
-    web_addr="$(input_nonempty "Web API bind address" "127.0.0.1")"
-    web_port="$(input_int_range "Web API port" 1 65535 "2060")"
-    port_in_use "${web_port}" && die "Web API port ${web_port} is in use."
-    secret="$(input_nonempty "Web API secret" "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)")"
-    echo "${web_addr}|${web_port}|${secret}"
-  else
-    echo ""
+  tty_out ""
+  tty_out "${BOLD}Web panel (optional)${NC}"
+  tty_out "Set the web panel port. Use 0 to disable."
+  local web_port
+  web_port="$(input_int_range "Web port" 0 65535 "2060")"
+  if (( web_port > 0 )); then
+    port_in_use "${web_port}" && die "Web port ${web_port} is in use."
   fi
+  echo "${web_port}"
 }
+
 
 check_port_80_hint() {
   if port_in_use 80; then
@@ -480,7 +553,11 @@ check_port_80_hint() {
 }
 
 input_tls_if_needed() {
-  local transport="$1"
+  local transport="$1" role="${2:-server}"
+  if [[ "${role}" != "server" ]]; then
+    echo ""
+    return 0
+  fi
   if [[ "${transport}" == "wss" || "${transport}" == "wssmux" ]]; then
     tty_out ""
     tty_out "${BOLD}TLS configuration required for:${NC} ${transport}"
@@ -503,6 +580,7 @@ input_tls_if_needed() {
   fi
 }
 
+
 input_ws_path() {
   local p
   p="$(input_nonempty "WebSocket path (must start with /)" "/")"
@@ -511,15 +589,13 @@ input_ws_path() {
 }
 
 write_config_server() {
-  local name="$1" transport="$2" listen_port="$3" ports_rules="$4" web_info="$5" tls_info="$6"
-  local conf; conf="$(conf_path_for "${name}")"
+  local name="$1" transport="$2" listen_port="$3" bind_ip="$4" ports_rules="$5"
+  local token="$6" accept_udp="$7" keepalive_period="$8" nodelay="$9" channel_size="${10}" heartbeat="${11}"
+  local mux_con="${12}" mux_version="${13}" mux_framesize="${14}" mux_recievebuffer="${15}" mux_streambuffer="${16}"
+  local sniffer="${17}" web_port="${18}" sniffer_log="${19}" log_level="${20}" skip_optz="${21}"
+  local mss="${22}" so_rcvbuf="${23}" so_sndbuf="${24}" tls_info="${25}"
 
-  local web_addr="" web_port="" secret=""
-  if [[ -n "${web_info}" ]]; then
-    web_addr="${web_info%%|*}"
-    web_port="$(echo "${web_info}" | cut -d'|' -f2)"
-    secret="$(echo "${web_info}" | cut -d'|' -f3)"
-  fi
+  local conf; conf="$(conf_path_for "${name}")"
 
   local tls_cert="" tls_key=""
   if [[ -n "${tls_info}" ]]; then
@@ -533,19 +609,53 @@ write_config_server() {
 
   cat > "${conf}" <<EOF
 [server]
-bind_addr = "0.0.0.0:${listen_port}"
+bind_addr = "${bind_ip}:${listen_port}"
 transport = "${transport}"
-${ports_toml}
+token = "${token}"
 EOF
 
-  if [[ -n "${web_info}" ]]; then
-    cat >> "${conf}" <<EOF
-web_port = ${web_port}
-secret = "${secret}"
-web_addr = "${web_addr}"
-EOF
+  # Transport-specific settings
+  if [[ "${transport}" == "tcp" ]]; then
+    echo "accept_udp = ${accept_udp}" >> "${conf}"
+    echo "keepalive_period = ${keepalive_period}" >> "${conf}"
+    echo "nodelay = ${nodelay}" >> "${conf}"
+    echo "heartbeat = ${heartbeat}" >> "${conf}"
+  elif [[ "${transport}" == "tcpmux" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
+    echo "keepalive_period = ${keepalive_period}" >> "${conf}"
+    echo "nodelay = ${nodelay}" >> "${conf}"
+    echo "heartbeat = ${heartbeat}" >> "${conf}"
+    echo "mux_con = ${mux_con}" >> "${conf}"
+    echo "mux_version = ${mux_version}" >> "${conf}"
+    echo "mux_framesize = ${mux_framesize}" >> "${conf}"
+    echo "mux_recievebuffer = ${mux_recievebuffer}" >> "${conf}"
+    echo "mux_streambuffer = ${mux_streambuffer}" >> "${conf}"
+  elif [[ "${transport}" == "ws" || "${transport}" == "wss" ]]; then
+    echo "keepalive_period = ${keepalive_period}" >> "${conf}"
+    echo "nodelay = ${nodelay}" >> "${conf}"
+    # README lists heartbeat for ws (not for wss example)
+    if [[ "${transport}" == "ws" ]]; then
+      echo "heartbeat = ${heartbeat}" >> "${conf}"
+    fi
+  elif [[ "${transport}" == "udp" ]]; then
+    echo "heartbeat = ${heartbeat}" >> "${conf}"
   fi
 
+  # Common settings (across examples)
+  echo "channel_size = ${channel_size}" >> "${conf}"
+  echo "sniffer = ${sniffer}" >> "${conf}"
+  echo "web_port = ${web_port}" >> "${conf}"
+  echo "sniffer_log = \"${sniffer_log}\"" >> "${conf}"
+  echo "log_level = \"${log_level}\"" >> "${conf}"
+  echo "skip_optz = ${skip_optz}" >> "${conf}"
+
+  # TCP/TCPMux tuning (optional; empty => omit to keep system defaults)
+  if [[ "${transport}" == "tcp" || "${transport}" == "tcpmux" ]]; then
+    [[ -n "${mss}" ]] && echo "mss = ${mss}" >> "${conf}"
+    [[ -n "${so_rcvbuf}" ]] && echo "so_rcvbuf = ${so_rcvbuf}" >> "${conf}"
+    [[ -n "${so_sndbuf}" ]] && echo "so_sndbuf = ${so_sndbuf}" >> "${conf}"
+  fi
+
+  # TLS (server only)
   if [[ -n "${tls_info}" ]]; then
     cat >> "${conf}" <<EOF
 tls_cert = "${tls_cert}"
@@ -553,9 +663,13 @@ tls_key = "${tls_key}"
 EOF
   fi
 
+  echo "${ports_toml}" >> "${conf}"
+
   chmod 600 "${conf}"
   echo "${conf}"
 }
+
+
 
 format_remote_addr() {
   local host="$1" port="$2"
@@ -567,52 +681,63 @@ format_remote_addr() {
 }
 
 write_config_client() {
-  local name="$1" transport="$2" remote_addr="$3" ws_path="$4" web_info="$5" tls_info="$6"
+  local name="$1" transport="$2" remote_addr="$3" edge_ip="$4"
+  local token="$5" connection_pool="$6" aggressive_pool="$7" keepalive_period="$8" dial_timeout="$9"
+  local nodelay="${10}" retry_interval="${11}"
+  local mux_version="${12}" mux_framesize="${13}" mux_recievebuffer="${14}" mux_streambuffer="${15}"
+  local sniffer="${16}" web_port="${17}" sniffer_log="${18}" log_level="${19}" skip_optz="${20}"
+  local mss="${21}" so_rcvbuf="${22}" so_sndbuf="${23}"
+
   local conf; conf="$(conf_path_for "${name}")"
-
-  local web_addr="" web_port="" secret=""
-  if [[ -n "${web_info}" ]]; then
-    web_addr="${web_info%%|*}"
-    web_port="$(echo "${web_info}" | cut -d'|' -f2)"
-    secret="$(echo "${web_info}" | cut -d'|' -f3)"
-  fi
-
-  local tls_cert="" tls_key=""
-  if [[ -n "${tls_info}" ]]; then
-    tls_cert="${tls_info%%|*}"
-    tls_key="$(echo "${tls_info}" | cut -d'|' -f2)"
-  fi
 
   cat > "${conf}" <<EOF
 [client]
 remote_addr = "${remote_addr}"
 transport = "${transport}"
+token = "${token}"
 EOF
 
   if [[ "${transport}" == "ws" || "${transport}" == "wss" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
-    cat >> "${conf}" <<EOF
-path = "${ws_path}"
-EOF
+    echo "edge_ip = \"${edge_ip}\"" >> "${conf}"
   fi
 
-  if [[ -n "${web_info}" ]]; then
-    cat >> "${conf}" <<EOF
-web_port = ${web_port}
-secret = "${secret}"
-web_addr = "${web_addr}"
-EOF
+  # Pools / timers depend on transport
+  if [[ "${transport}" != "udp" ]]; then
+    echo "connection_pool = ${connection_pool}" >> "${conf}"
+    echo "aggressive_pool = ${aggressive_pool}" >> "${conf}"
+    echo "keepalive_period = ${keepalive_period}" >> "${conf}"
+    echo "dial_timeout = ${dial_timeout}" >> "${conf}"
+    echo "retry_interval = ${retry_interval}" >> "${conf}"
+    echo "nodelay = ${nodelay}" >> "${conf}"
+  else
+    echo "connection_pool = ${connection_pool}" >> "${conf}"
+    echo "aggressive_pool = ${aggressive_pool}" >> "${conf}"
+    echo "retry_interval = ${retry_interval}" >> "${conf}"
   fi
 
-  if [[ -n "${tls_info}" ]]; then
-    cat >> "${conf}" <<EOF
-tls_cert = "${tls_cert}"
-tls_key = "${tls_key}"
-EOF
+  if [[ "${transport}" == "tcpmux" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
+    echo "mux_version = ${mux_version}" >> "${conf}"
+    echo "mux_framesize = ${mux_framesize}" >> "${conf}"
+    echo "mux_recievebuffer = ${mux_recievebuffer}" >> "${conf}"
+    echo "mux_streambuffer = ${mux_streambuffer}" >> "${conf}"
+  fi
+
+  echo "sniffer = ${sniffer}" >> "${conf}"
+  echo "web_port = ${web_port}" >> "${conf}"
+  echo "sniffer_log = \"${sniffer_log}\"" >> "${conf}"
+  echo "log_level = \"${log_level}\"" >> "${conf}"
+  echo "skip_optz = ${skip_optz}" >> "${conf}"
+
+  if [[ "${transport}" == "tcp" || "${transport}" == "tcpmux" ]]; then
+    [[ -n "${mss}" ]] && echo "mss = ${mss}" >> "${conf}"
+    [[ -n "${so_rcvbuf}" ]] && echo "so_rcvbuf = ${so_rcvbuf}" >> "${conf}"
+    [[ -n "${so_sndbuf}" ]] && echo "so_sndbuf = ${so_sndbuf}" >> "${conf}"
   fi
 
   chmod 600 "${conf}"
   echo "${conf}"
 }
+
 
 create_tunnel() {
   [[ -x "${CORE_BIN}" ]] || die "Core is not installed. Use Install/Update first."
@@ -643,27 +768,161 @@ create_tunnel() {
   local tunnel_port
   tunnel_port="$(input_tunnel_port)"
 
-  local web_info tls_info
-  web_info="$(input_web_api)"
-  tls_info="$(input_tls_if_needed "${transport}")"
+  # Common defaults (per Backhaul docs), with your overrides:
+  # keepalive_period default => 15 (instead of 75)
+  # heartbeat default => 10 (instead of 40/20)
+  local def_keepalive="15"
+  local def_heartbeat="10"
 
-  local conf=""
+  local token_default; token_default="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+
+  local web_port tls_info
+  web_port="$(input_web_api)"
+
   if [[ "${role}" == "server" ]]; then
-    local ports_rules
-    ports_rules="$(input_ports_rules_server)"
-    conf="$(write_config_server "${name}" "${transport}" "${tunnel_port}" "${ports_rules}" "${web_info}" "${tls_info}")"
-  else
-    local edge_host remote_addr ws_path="/"
-    tty_out ""
-    tty_out "${BOLD}Client remote setup:${NC}"
-    tty_out "Enter the public Edge host of the server (IPv4/domain/IPv6)."
-    edge_host="$(input_edge_host)"
-    remote_addr="$(format_remote_addr "${edge_host}" "${tunnel_port}")"
-    if [[ "${transport}" == "ws" || "${transport}" == "wss" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
-      ws_path="$(input_ws_path)"
+    tls_info="$(input_tls_if_needed "${transport}" "server")"
+    local bind_ip; bind_ip="$(input_nonempty "Server bind IP" "0.0.0.0")"
+
+    local ports_rules; ports_rules="$(input_ports_rules_server)"
+
+    # --- Ask ALL relevant server options ---
+    local token accept_udp keepalive_period nodelay channel_size heartbeat
+    local mux_con mux_version mux_framesize mux_recievebuffer mux_streambuffer
+    local sniffer sniffer_log log_level skip_optz
+    local mss so_rcvbuf so_sndbuf
+
+    token="$(input_nonempty "Token (shared secret)" "${token_default}")"
+
+    accept_udp="false"
+    if [[ "${transport}" == "tcp" ]]; then
+      accept_udp="$(input_bool "accept_udp (transfer UDP over TCP)?" "false")"
     fi
-    conf="$(write_config_client "${name}" "${transport}" "${remote_addr}" "${ws_path}" "${web_info}" "${tls_info}")"
+
+    keepalive_period="${def_keepalive}"
+    if [[ "${transport}" != "udp" ]]; then
+      keepalive_period="$(input_int_range "keepalive_period (seconds)" 1 86400 "${def_keepalive}")"
+    fi
+
+    nodelay="$(input_bool "nodelay (TCP_NODELAY)?" "false")"
+    channel_size="$(input_int_range "channel_size" 1 1048576 "2048")"
+
+    heartbeat="${def_heartbeat}"
+    if [[ "${transport}" == "udp" ]]; then
+      heartbeat="$(input_int_range "heartbeat (seconds)" 1 86400 "${def_heartbeat}")"
+    else
+      heartbeat="$(input_int_range "heartbeat (seconds)" 1 86400 "${def_heartbeat}")"
+    fi
+
+    mux_con="8"; mux_version="1"; mux_framesize="32768"; mux_recievebuffer="4194304"; mux_streambuffer="65536"
+    if [[ "${transport}" == "tcpmux" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
+      mux_con="$(input_int_range "mux_con" 1 1024 "8")"
+      mux_version="$(input_int_range "mux_version (1 or 2)" 1 2 "1")"
+      mux_framesize="$(input_int_range "mux_framesize" 1024 1048576 "32768")"
+      mux_recievebuffer="$(input_int_range "mux_recievebuffer" 1024 1073741824 "4194304")"
+      mux_streambuffer="$(input_int_range "mux_streambuffer" 1024 1073741824 "65536")"
+    fi
+
+    sniffer="$(input_bool "sniffer (enable traffic sniffing)?" "false")"
+    sniffer_log="$(input_nonempty "sniffer_log path" "/root/backhaul.json")"
+    log_level="$(input_choice_log_level "info")"
+    skip_optz="$(input_bool "skip_optz (disable optimizations)?" "false")"
+
+    mss=""; so_rcvbuf=""; so_sndbuf=""
+    if [[ "${transport}" == "tcp" || "${transport}" == "tcpmux" ]]; then
+      tty_out ""
+      tty_out "${BOLD}TCP/TCPMux tuning (leave empty to keep system defaults)${NC}"
+      mss="$(input_optional_int_or_empty "mss (bytes)" "")"
+      so_rcvbuf="$(input_optional_int_or_empty "so_rcvbuf (bytes)" "")"
+      so_sndbuf="$(input_optional_int_or_empty "so_sndbuf (bytes)" "")"
+    fi
+
+    local conf
+    conf="$(write_config_server "${name}" "${transport}" "${tunnel_port}" "${bind_ip}" "${ports_rules}" \
+      "${token}" "${accept_udp}" "${keepalive_period}" "${nodelay}" "${channel_size}" "${heartbeat}" \
+      "${mux_con}" "${mux_version}" "${mux_framesize}" "${mux_recievebuffer}" "${mux_streambuffer}" \
+      "${sniffer}" "${web_port}" "${sniffer_log}" "${log_level}" "${skip_optz}" \
+      "${mss}" "${so_rcvbuf}" "${so_sndbuf}" "${tls_info}")"
+
+    local svc; svc="$(svc_name_for "${name}")"
+    systemd_write_unit "${svc}" "${conf}"
+    systemd_enable_start "${svc}"
+    db_add_or_update "${name}" "${role}" "${transport}" "${conf}" "${svc}"
+
+    tty_out ""
+    tty_out "${GREEN}Tunnel created/updated:${NC} ${name}"
+    tty_out "Config: ${conf}"
+    tty_out "Service: ${svc} (status: $(systemd_status_line "${svc}"))"
+    pause
+    return 0
   fi
+
+  # --- client ---
+  tls_info=""  # no client TLS fields in upstream docs
+  local edge_host remote_addr
+  tty_out ""
+  tty_out "${BOLD}Client remote setup:${NC}"
+  tty_out "Enter the public Edge host of the server (IPv4/domain/IPv6)."
+  edge_host="$(input_edge_host)"
+  remote_addr="$(format_remote_addr "${edge_host}" "${tunnel_port}")"
+
+  # --- Ask ALL relevant client options ---
+  local edge_ip token connection_pool aggressive_pool keepalive_period dial_timeout retry_interval nodelay
+  local mux_version mux_framesize mux_recievebuffer mux_streambuffer
+  local sniffer sniffer_log log_level skip_optz
+  local mss so_rcvbuf so_sndbuf
+
+  edge_ip=""
+  if [[ "${transport}" == "ws" || "${transport}" == "wss" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
+    edge_ip="$(input_text_allow_empty "edge_ip (CDN edge IP; empty allowed)" "")"
+  fi
+
+  token="$(input_nonempty "Token (must match server)" "${token_default}")"
+  connection_pool="$(input_int_range "connection_pool" 1 65535 "8")"
+  aggressive_pool="$(input_bool "aggressive_pool?" "false")"
+
+  keepalive_period="${def_keepalive}"
+  dial_timeout="10"
+  retry_interval="3"
+  nodelay="true"
+
+  if [[ "${transport}" != "udp" ]]; then
+    keepalive_period="$(input_int_range "keepalive_period (seconds)" 1 86400 "${def_keepalive}")"
+    dial_timeout="$(input_int_range "dial_timeout (seconds)" 1 86400 "10")"
+    retry_interval="$(input_int_range "retry_interval (seconds)" 1 86400 "3")"
+    nodelay="$(input_bool "nodelay (TCP_NODELAY)?" "true")"
+  else
+    retry_interval="$(input_int_range "retry_interval (seconds)" 1 86400 "3")"
+  fi
+
+  mux_version="1"; mux_framesize="32768"; mux_recievebuffer="4194304"; mux_streambuffer="65536"
+  if [[ "${transport}" == "tcpmux" || "${transport}" == "wsmux" || "${transport}" == "wssmux" ]]; then
+    mux_version="$(input_int_range "mux_version (1 or 2)" 1 2 "1")"
+    mux_framesize="$(input_int_range "mux_framesize" 1024 1048576 "32768")"
+    mux_recievebuffer="$(input_int_range "mux_recievebuffer" 1024 1073741824 "4194304")"
+    mux_streambuffer="$(input_int_range "mux_streambuffer" 1024 1073741824 "65536")"
+  fi
+
+  sniffer="$(input_bool "sniffer (enable traffic sniffing)?" "false")"
+  sniffer_log="$(input_nonempty "sniffer_log path" "/root/backhaul.json")"
+  log_level="$(input_choice_log_level "info")"
+  skip_optz="$(input_bool "skip_optz (disable optimizations)?" "false")"
+
+  mss=""; so_rcvbuf=""; so_sndbuf=""
+  if [[ "${transport}" == "tcp" || "${transport}" == "tcpmux" ]]; then
+    tty_out ""
+    tty_out "${BOLD}TCP/TCPMux tuning (leave empty to keep system defaults)${NC}"
+    mss="$(input_optional_int_or_empty "mss (bytes)" "")"
+    so_rcvbuf="$(input_optional_int_or_empty "so_rcvbuf (bytes)" "")"
+    so_sndbuf="$(input_optional_int_or_empty "so_sndbuf (bytes)" "")"
+  fi
+
+  local conf
+  conf="$(write_config_client "${name}" "${transport}" "${remote_addr}" "${edge_ip}" \
+    "${token}" "${connection_pool}" "${aggressive_pool}" "${keepalive_period}" "${dial_timeout}" \
+    "${nodelay}" "${retry_interval}" \
+    "${mux_version}" "${mux_framesize}" "${mux_recievebuffer}" "${mux_streambuffer}" \
+    "${sniffer}" "${web_port}" "${sniffer_log}" "${log_level}" "${skip_optz}" \
+    "${mss}" "${so_rcvbuf}" "${so_sndbuf}")"
 
   local svc; svc="$(svc_name_for "${name}")"
   systemd_write_unit "${svc}" "${conf}"
@@ -677,6 +936,7 @@ create_tunnel() {
   pause
 }
 
+
 # ---------- management ----------
 list_tunnels_screen() {
   print_header
@@ -686,25 +946,44 @@ list_tunnels_screen() {
     tty_out "No tunnels found."
     return 0
   fi
-  printf "%-20s %-8s %-8s %-30s %-20s\n" "NAME" "ROLE" "TRANS" "CONFIG" "STATUS" > /dev/tty
-  tty_out "------------------------------------------------------------------------------------------------------"
+  printf "%-4s %-20s %-8s %-8s %-30s %-20s\n" "NO" "NAME" "ROLE" "TRANS" "CONFIG" "STATUS" > /dev/tty
+  tty_out "---------------------------------------------------------------------------------------------------------------"
+  local i=0
   while IFS='|' read -r name role trans conf svc; do
     [[ -z "${name:-}" ]] && continue
+    ((i++))
     local st; st="$(systemd_status_line "${svc}")"
-    printf "%-20s %-8s %-8s %-30s %-20b\n" "${name}" "${role}" "${trans}" "$(basename "${conf}")" "${st}" > /dev/tty
+    printf "%-4s %-20s %-8s %-8s %-30s %-20b\n" "${i}" "${name}" "${role}" "${trans}" "$(basename "${conf}")" "${st}" > /dev/tty
   done < "${DB_FILE}"
 }
+
 
 pick_tunnel() {
   list_tunnels_screen
   tty_out ""
-  local name
+  local count; count="$(awk -F'|' 'NF>=1 && $1!="" {c++} END{print c+0}' "${DB_FILE}")"
+  (( count > 0 )) || { echo ""; return 0; }
+
+  local n=""
   while true; do
-    name="$(input_nonempty "Enter tunnel name" "")"
-    db_has_tunnel "${name}" && { echo "${name}"; return 0; }
+    tty_readline n "Enter tunnel number [default: 0=Back]: "
+    n="${n:-0}"
+    [[ "${n}" =~ ^[0-9]+$ ]] || { tty_out "Please enter a number."; continue; }
+    if (( n == 0 )); then
+      echo ""
+      return 0
+    fi
+    if (( n < 1 || n > count )); then
+      tty_out "Out of range (1-${count})"
+      continue
+    fi
+    local name
+    name="$(awk -F'|' -v idx="${n}" 'NF>=1 && $1!="" {c++; if(c==idx){print $1; exit}}' "${DB_FILE}")"
+    [[ -n "${name}" ]] && { echo "${name}"; return 0; }
     tty_out "Tunnel not found."
   done
 }
+
 
 tunnel_actions() {
   ensure_dirs
@@ -719,7 +998,8 @@ tunnel_actions() {
   fi
 
   local tname; tname="$(pick_tunnel)"
-  local line; line="$(grep -E "^${tname}\|" "${DB_FILE}" || true)"
+  [[ -n "${tname}" ]] || return
+  local line; line="$(awk -F'|' -v n="${tname}" '$1==n {print; exit}' "${DB_FILE}" || true)"
   [[ -n "${line}" ]] || die "Internal error: tunnel record missing."
   local name role trans conf svc
   IFS='|' read -r name role trans conf svc <<< "${line}"
@@ -797,19 +1077,56 @@ restart_all_ui() {
 timer_unit_name() { echo "backhaul-manager-${1}.timer"; }
 timer_svc_name() { echo "backhaul-manager-${1}.service"; }
 
+show_scheduling_status() {
+  print_header
+  tty_out "${BOLD}Scheduling Status${NC}"
+  tty_out ""
+
+  if [[ -f /etc/cron.d/backhaul-manager ]]; then
+    tty_out "${BOLD}Cron:${NC} /etc/cron.d/backhaul-manager"
+    sed 's/^/  /' /etc/cron.d/backhaul-manager > /dev/tty || true
+  else
+    tty_out "${BOLD}Cron:${NC} (none)"
+  fi
+
+  tty_out ""
+  tty_out "${BOLD}Systemd timers:${NC}"
+  systemctl list-timers --all --no-pager 2>/dev/null | grep -E "backhaul-manager-(restart-all|health-check)\.timer" > /dev/tty || tty_out "  (none)"
+
+  tty_out ""
+  for u in "$(timer_unit_name restart-all)" "$(timer_unit_name health-check)"; do
+    if systemctl status "${u}" --no-pager >/dev/null 2>&1; then
+      local st; st="$(systemctl is-enabled "${u}" 2>/dev/null || true)"
+      local act; act="$(systemctl is-active "${u}" 2>/dev/null || true)"
+      tty_out "  ${u}: enabled=${st} active=${act}"
+    fi
+  done
+  tty_out ""
+  pause
+}
+
 create_schedule() {
-  local kind="$1" hours="$2"
+  local kind="$1" minutes="$2"
 
   if [[ "${kind}" == "cron" ]]; then
-    local cron_line="0 */${hours} * * * root ${APP_CMD} --restart-all >/dev/null 2>&1"
     local cron_file="/etc/cron.d/backhaul-manager"
+    local cron_line=""
+    if (( minutes <= 59 )); then
+      cron_line="*/${minutes} * * * * root ${APP_CMD} --restart-all >/dev/null 2>&1"
+    elif (( minutes % 60 == 0 )); then
+      local hours=$(( minutes / 60 ))
+      cron_line="0 */${hours} * * * root ${APP_CMD} --restart-all >/dev/null 2>&1"
+    else
+      die "Cron cannot reliably schedule every ${minutes} minutes. Use the systemd timer option instead."
+    fi
+
     if grep -qF "${APP_CMD} --restart-all" "${cron_file}" 2>/dev/null; then
       sed -i "s#.*${APP_CMD} --restart-all.*#${cron_line}#g" "${cron_file}"
     else
       echo "${cron_line}" > "${cron_file}"
     fi
     chmod 644 "${cron_file}"
-    tty_out "Cron configured: restart all every ${hours} hour(s)."
+    tty_out "Cron configured: restart all every ${minutes} minute(s)."
     return 0
   fi
 
@@ -832,7 +1149,7 @@ Description=Backhaul Manager - Restart All Tunnels (Timer)
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=${hours}h
+OnUnitActiveSec=${minutes}min
 Persistent=true
 
 [Install]
@@ -841,7 +1158,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now "$(timer_unit_name restart-all)" >/dev/null
-    tty_out "Systemd timer configured: restart all every ${hours} hour(s)."
+    tty_out "Systemd timer configured: restart all every ${minutes} minute(s)."
     return 0
   fi
 
@@ -864,7 +1181,7 @@ Description=Backhaul Manager - Health Check Tunnels (Timer)
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=${hours}h
+OnUnitActiveSec=${minutes}min
 Persistent=true
 
 [Install]
@@ -873,12 +1190,13 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now "$(timer_unit_name health-check)" >/dev/null
-    tty_out "Health-check timer configured: every ${hours} hour(s)."
+    tty_out "Health-check timer configured: every ${minutes} minute(s)."
     return 0
   fi
 
   die "Unknown schedule kind: ${kind}"
 }
+
 
 disable_scheduling() {
   rm -f /etc/cron.d/backhaul-manager 2>/dev/null || true
@@ -893,21 +1211,24 @@ schedule_menu() {
   print_header
   tty_out "${BOLD}Scheduling (Restart / Health Check)${NC}"
   tty_out ""
-  tty_out "1) Cron job (restart-all periodically)"
-  tty_out "2) Systemd timer (restart-all periodically)  [recommended over cron]"
-  tty_out "3) Health-check timer (restart only if a tunnel is down)  [safest]"
-  tty_out "4) Disable scheduling (remove cron + timers)"
+  tty_out "1) Show scheduling status (cron + timers)"
+  tty_out "2) Cron job (restart-all periodically)"
+  tty_out "3) Systemd timer (restart-all periodically)  [recommended over cron]"
+  tty_out "4) Health-check timer (restart only if a tunnel is down)  [safest]"
+  tty_out "5) Disable scheduling (remove cron + timers)"
   tty_out "0) Back"
   tty_out ""
-  local c; c="$(input_int_range "Choice" 0 4 "3")"
+  local c; c="$(input_int_range "Choice" 0 5 "1")"
   case "${c}" in
-    1) local h; h="$(input_int_range "Every how many hours?" 1 168 "6")"; create_schedule "cron" "${h}"; pause ;;
-    2) local h; h="$(input_int_range "Every how many hours?" 1 168 "6")"; create_schedule "timer" "${h}"; pause ;;
-    3) local h; h="$(input_int_range "Every how many hours?" 1 168 "1")"; create_schedule "health" "${h}"; pause ;;
-    4) disable_scheduling; tty_out "Scheduling disabled."; pause ;;
+    1) show_scheduling_status ;;
+    2) local m; m="$(input_int_range "Every how many minutes?" 1 10080 "360")"; create_schedule "cron" "${m}"; pause ;;
+    3) local m; m="$(input_int_range "Every how many minutes?" 1 10080 "360")"; create_schedule "timer" "${m}"; pause ;;
+    4) local m; m="$(input_int_range "Every how many minutes?" 1 10080 "60")"; create_schedule "health" "${m}"; pause ;;
+    5) disable_scheduling; tty_out "Scheduling disabled."; pause ;;
     0) ;;
   esac
 }
+
 
 health_check() {
   ensure_dirs
