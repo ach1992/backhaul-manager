@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.13)
+# Backhaul Manager (v1.0.0)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.13"
+MANAGER_VERSION="v1.0.0"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -1317,26 +1317,46 @@ show_scheduling_status() {
   tty_out "${BOLD}Scheduling Status${NC}"
   tty_out ""
 
+  # ---- cron ----
   if [[ -f /etc/cron.d/backhaul-manager ]]; then
-    tty_out "${BOLD}Cron:${NC} /etc/cron.d/backhaul-manager"
+    tty_out "${BOLD}Cron:${NC} ${GREEN}enabled${NC}  ${GRAY}(/etc/cron.d/backhaul-manager)${NC}"
     sed 's/^/  /' /etc/cron.d/backhaul-manager > /dev/tty || true
   else
-    tty_out "${BOLD}Cron:${NC} (none)"
+    tty_out "${BOLD}Cron:${NC} ${YELLOW}(none)${NC}"
   fi
 
   tty_out ""
   tty_out "${BOLD}Systemd timers:${NC}"
-  if systemctl list-timers --all --no-pager 2>/dev/null | grep -qE "backhaul-manager-(restart-all|health-check)\.timer"; then
-    systemctl list-timers --all --no-pager 2>/dev/null | grep -E "backhaul-manager-(restart-all|health-check)\.timer" > /dev/tty || true
-  else
-    tty_out "  (none)"
-  fi
+																															 
+																																		
+	  
+					  
+	
 
-  tty_out ""
-  tty_out "${BOLD}Timer details:${NC}"
-  for u in "$(timer_unit_name restart-all)" "$(timer_unit_name health-check)"; do
+  local timers=()
+  timers+=("$(timer_unit_name restart-all)")
+  timers+=("$(timer_unit_name health-check)")
+
+  local any=0
+  for u in "${timers[@]}"; do
     if systemctl status "${u}" --no-pager >/dev/null 2>&1; then
-      local st act next last
+      any=1
+      break
+    fi
+  done
+
+  if [[ "${any}" -eq 0 ]]; then
+    tty_out "  ${YELLOW}(none)${NC}"
+  else
+    tty_out "  ${BOLD}NAME${NC}                           ${BOLD}ENABLED${NC}    ${BOLD}ACTIVE${NC}     ${BOLD}NEXT${NC}                        ${BOLD}LAST${NC}"
+    tty_out "  -------------------------------------------------------------------------------"
+    for u in "${timers[@]}"; do
+      if ! systemctl status "${u}" --no-pager >/dev/null 2>&1; then
+        tty_out "  ${u}  ${YELLOW}not-installed${NC}"
+        continue
+      fi
+
+      local st act next last stc actc
       st="$(systemctl is-enabled "${u}" 2>/dev/null || true)"
       act="$(systemctl is-active "${u}" 2>/dev/null || true)"
       next="$(systemctl show "${u}" -p NextElapseUSecRealtime --value 2>/dev/null || true)"
@@ -1345,16 +1365,17 @@ show_scheduling_status() {
       [[ -z "${next}" ]] && next="n/a"
       [[ -z "${last}" ]] && last="n/a"
 
-      tty_out "  ${u}: enabled=${st}  active=${act}"
-      tty_out "    next: ${next}"
-      tty_out "    last: ${last}"
-    else
-      tty_out "  ${u}: (not installed)"
-    fi
-  done
+      stc="$(badge_enabled "${st}")"
+      actc="$(badge_active "${act}")"
+
+      # Keep columns readable even with ANSI colors (values are short).
+      printf "  %-30s  %-10b  %-10b  %-26s  %-26s
+"         "${u}" "${stc}" "${actc}" "${next}" "${last}" > /dev/tty
+    done
+  fi
 
   tty_out ""
-  tty_out "${GRAY}Note:${NC} If NEXT/LEFT shows n/a, it usually means the timer has no upcoming trigger (misparsed schedule or only ran OnBootSec once). Recreate the timer from the Scheduling menu to regenerate unit files."
+  tty_out "${GRAY}Tip:${NC} if NEXT shows ${BOLD}n/a${NC}, the timer has no upcoming trigger (bad schedule or missing OnCalendar/OnUnit*). Recreate it from the Scheduling menu."
   tty_out ""
   pause
 }
