@@ -347,7 +347,7 @@ db_add_or_update() {
     echo "${name}|${role}|${transport}|${conf}|${svc}" >> "${DB_FILE}"
   fi
 }
-db_remove() { sed -i "/^${1}\|/d" "${DB_FILE}"; }
+db_remove() { sed -i "/^${1}[|]/d" "${DB_FILE}"; }
 
 svc_name_for() { echo "backhaul-${1}.service"; }
 conf_path_for() { echo "${TUNNELS_DIR}/${1}.toml"; }
