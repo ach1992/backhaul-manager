@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 # ==========================================
-# Backhaul Manager (v1.0.7)
+# Backhaul Manager (v1.0.8)
 # Manager Repo: https://github.com/ach1992/backhaul-manager/
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
-MANAGER_VERSION="v1.0.7"
+MANAGER_VERSION="v1.0.8"
 MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
@@ -297,27 +297,28 @@ port_in_use() {
 }
 
 tunnel_bind_port_taken() {
-  # Checks existing server tunnel configs for duplicate bind_port.
-  # Args: port, exclude_name(optional)
   local p="$1"
-  local exclude="${2:-}"
-  [[ -s "${DB_FILE}" ]] || return 1
+  [[ -s "$DB_FILE" ]] || return 1
 
-  while IFS='|' read -r name role trans conf svc; do
-    [[ -z "${name:-}" ]] && continue
-    [[ -n "${exclude}" && "${name}" == "${exclude}" ]] && continue
-    [[ "${role}" != "server" ]] && continue
-    [[ -f "${conf}" ]] || continue
+  local db_name db_role db_trans db_conf db_svc
+  while IFS='|' read -r db_name db_role db_trans db_conf db_svc; do
+    [[ -z "${db_name:-}" ]] && continue
+    [[ "${db_role}" != "server" ]] && continue
+    [[ -f "${db_conf}" ]] || continue
 
     local oldp=""
-    oldp="$(awk -F'=' '/^[[:space:]]*bind_port[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2; exit}' "${conf}" 2>/dev/null || true)"
+    oldp="$(awk -F'=' '
+      /^[[:space:]]*bind_port[[:space:]]*=/ {
+        gsub(/[[:space:]]/,"",$2);
+        print $2;
+        exit
+      }' "${db_conf}" 2>/dev/null || true)"
+
     [[ -n "${oldp}" && "${oldp}" == "${p}" ]] && return 0
-  done < "${DB_FILE}"
+  done < "$DB_FILE"
 
   return 1
 }
-
-
 
 # ---------- DB ----------
 db_has_tunnel() { awk -F'|' -v n="$1" '$1==n{found=1} END{exit !found}' "${DB_FILE}"; }
@@ -678,7 +679,16 @@ method=letsencrypt
 domain=${domain}
 email=${email}
 EOF
-      break
+
+
+      tty_out ""
+	  tty_out "${GREEN}SUCCESS:${NC} Let's Encrypt certificate issued for ${domain}"
+	  tty_out "Saved TLS files:"
+	  tty_out "  cert: ${cert_out}"
+	  tty_out "  key : ${key_out}"
+	  tty_out ""
+	  
+	  break
 
     elif [[ "${method}" == "2" ]]; then
       local cn days
@@ -947,7 +957,11 @@ create_tunnel() {
     tls_info="$(input_tls_if_needed "${transport}" "server" "${name}")"
     local bind_ip; bind_ip="$(input_nonempty "Server bind IP" "0.0.0.0")"
 
-    local ports_rules; ports_rules="$(input_ports_rules_server)"
+	local ports_rules; ports_rules="$(input_ports_rules_server || true)"
+	while [[ -z "${ports_rules//$'\n'/}" ]]; do
+      tty_out "${RED}ERROR:${NC} At least one ports rule is required."
+      ports_rules="$(input_ports_rules_server || true)"
+	done
 
     # --- Ask ALL relevant server options ---
     local token accept_udp keepalive_period nodelay channel_size heartbeat
