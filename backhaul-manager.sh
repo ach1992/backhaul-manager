@@ -3,12 +3,12 @@ set -Eeuo pipefail
 
 # ==========================================
 # Backhaul Manager (v0.0.1)
-# Manager Repo: https://github.com/ach1992/backhaul-manager/
+# Manager Repo: https://github.com/ach1992/backhaul-manager
 # Core Repo:    https://github.com/Musixal/Backhaul
 # ==========================================
 
 MANAGER_VERSION="v0.0.1"
-MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager/"
+MANAGER_REPO_URL="https://github.com/ach1992/backhaul-manager"
 CORE_REPO_URL="https://github.com/Musixal/Backhaul"
 MANAGER_RAW_URL="https://raw.githubusercontent.com/ach1992/backhaul-manager/main/backhaul-manager.sh"
 
