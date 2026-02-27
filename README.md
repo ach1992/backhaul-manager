@@ -253,4 +253,4 @@ It can optionally remove the core binary (`/usr/local/bin/backhaul`) as well.
 
 ## License
 
-Add your license here (e.g., MIT) if you plan to publish publicly.
+License (MIT).
